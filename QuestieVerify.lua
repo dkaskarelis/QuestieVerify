@@ -5,6 +5,10 @@
 -- wrong quest giver, you travel there for nothing. This add-on second-guesses each "!" before
 -- Questie draws it:
 --
+--   0. ForeverDB.net data (Data/ForeverDB.lua, built locally by tools/build_data.py from the
+--      ForeverDB.net Companion addon) and xelblch/questie-forever-fixes: side, race and class,
+--      prerequisites, exclusive quests, who a quest isn't offered to, and who really gives it.
+--      Data from ForeverDB.net (https://foreverdb.net)
 --   1. The game's own quest-line data (C_QuestLine): if the quest is a step in a quest line and the
 --      step before it isn't completed or in your log, the "!" is hidden.
 --   2. BtWQuests chain data, for quests the game doesn't put in a quest line and Questie has no
@@ -17,7 +21,8 @@
 --
 -- Nothing in Questie's files is changed; everything is done by wrapping two Questie functions.
 
-local ADDON_NAME = ...
+local ADDON_NAME, ns = ...
+ns = ns or {}
 
 local QV = {}
 _G.QuestieVerify = QV
@@ -34,6 +39,7 @@ local DEFAULTS = {
     learn = true,        -- learn from what NPCs offer
     chains = true,       -- use quest-line / BtWQuests chain data
     revisitLevels = 2,   -- a "not offered here" marker comes back (dimmed) after this many levels
+    foreverdb = true,    -- use the local ForeverDB.net / community data (Data/ForeverDB.lua)
     verbose = false,
 }
 
@@ -439,6 +445,268 @@ local function GloballyOffered(id, npcs)
 end
 
 ---------------------------------------------------------------------------
+-- Source 0: ForeverDB.net data (Data/ForeverDB.lua, built locally by tools/build_data.py from the
+-- ForeverDB.net Companion addon), plus xelblch/questie-forever-fixes prerequisites.
+-- Data from ForeverDB.net (https://foreverdb.net)
+---------------------------------------------------------------------------
+
+local FDB_CREDIT = "Data from ForeverDB.net (https://foreverdb.net)"
+local CLASS_IDS = { WARRIOR = 1, PALADIN = 2, HUNTER = 3, ROGUE = 4, PRIEST = 5, DEATHKNIGHT = 6,
+    SHAMAN = 7, MAGE = 8, WARLOCK = 9, MONK = 10, DRUID = 11 }
+local SIDE_NAME = { a = "Alliance", h = "Horde" }
+local fdbCache = {}
+local trainerClasses
+local npcMapCache = {}
+
+local function Ids(s)
+    local out = {}
+    for w in (s or ""):gmatch("%d+") do out[#out + 1] = tonumber(w) end
+    return out
+end
+
+local function HasBit(mask, n)
+    return math.floor(mask / 2 ^ (n - 1)) % 2 == 1
+end
+
+local function HasFdb()
+    return ns.fdb and ns.fdb.quests and db.settings.foreverdb ~= false
+end
+
+local function FdbQuest(id)
+    if not (ns.fdb and ns.fdb.quests) then return nil end
+    local c = fdbCache[id]
+    if c ~= nil then return c or nil end
+    local r = ns.fdb.quests[id]
+    if not r then fdbCache[id] = false return nil end
+    local q = {
+        id = id, side = r[1], races = r[2], classes = r[3], needAll = Ids(r[4]), needAny = Ids(r[5]),
+        excl = r[6], after = r[7], starts = {}, startsSrc = r[9], gone = r[10] == 1, by = r[11],
+        new = r[12] == 1, offerMaps = {}, offerMapsSrc = r[14], min = r[15], seenMin = r[16], forever = r[17] == 1,
+    }
+    for k, n in (r[8] or ""):gmatch("(%a)(%d+)") do tinsert(q.starts, { k = k, id = tonumber(n) }) end
+    for _, m in ipairs(Ids(r[13])) do q.offerMaps[m] = true; q.hasOfferMaps = true end
+    if q.after > 0 then
+        local have = false
+        for _, p in ipairs(q.needAll) do if p == q.after then have = true end end
+        if not have then tinsert(q.needAll, q.after) end
+    end
+    fdbCache[id] = q
+    return q
+end
+
+local function Me()
+    local faction = UnitFactionGroup and UnitFactionGroup("player")
+    local _, classFile, classId = UnitClass("player")
+    local _, raceFile, raceId = UnitRace("player")
+    return {
+        side = faction == "Alliance" and "a" or faction == "Horde" and "h" or "",
+        classFile = classFile, raceFile = raceFile,
+        class = tonumber(classId) or CLASS_IDS[classFile or ""], race = tonumber(raceId),
+    }
+end
+
+local function TrainerClasses()
+    if trainerClasses then return trainerClasses end
+    trainerClasses = {}
+    for class, list in pairs(ns.fdb and ns.fdb.trainers or {}) do
+        local cid = CLASS_IDS[class]
+        if cid then
+            for _, npc in ipairs(list) do
+                trainerClasses[npc] = trainerClasses[npc] or {}
+                trainerClasses[npc][cid] = true
+            end
+        end
+    end
+    return trainerClasses
+end
+
+--- Whether the quest is for this character's side, race and class (as ForeverDB's addon decides it).
+local function FdbFits(q, me)
+    if q.side ~= "" and me.side ~= "" and q.side ~= me.side then
+        return false, format("ForeverDB: it's an %s quest", SIDE_NAME[q.side] or q.side)
+    end
+    if q.races > 0 and me.race then
+        local wholeSide = q.races == 77 or q.races == 178 or q.races == 255
+        if not (wholeSide and me.race > 8) and not HasBit(q.races, me.race) then
+            return false, "ForeverDB: not for your race"
+        end
+    end
+    if q.classes > 0 and me.class and not HasBit(q.classes, me.class) then
+        return false, "ForeverDB: not for your class"
+    end
+    if q.classes == 0 and me.class then
+        local allowed
+        for _, ref in ipairs(q.starts) do
+            local classes = ref.k == "n" and TrainerClasses()[ref.id]
+            if classes then
+                allowed = allowed or {}
+                for cid in pairs(classes) do allowed[cid] = true end
+            end
+        end
+        if allowed and not allowed[me.class] then
+            return false, "ForeverDB: it starts at another class's trainer"
+        end
+    end
+    return true
+end
+
+local function FdbOfferRuledOut(id, me)
+    local rules = ns.fdb and ns.fdb.offers and ns.fdb.offers[id]
+    if not rules then return false end
+    for _, rule in ipairs(rules) do
+        local s, c, r = rule:match("^([^;]*);([^;]*);([^;]*)$")
+        if s and (s ~= "" or c ~= "" or r ~= "")
+            and (s == "" or s == me.side) and (c == "" or c == me.classFile) and (r == "" or r == me.raceFile) then
+            return true
+        end
+    end
+    return false
+end
+
+--- The uiMaps where Questie says an NPC stands.
+local function NpcUiMaps(npc)
+    local hit = npcMapCache[npc]
+    if hit ~= nil then return hit or nil end
+    local maps
+    if Q.DB and Q.DB.QueryNPCSingle and Q.Zone and Q.Zone.GetUiMapIdByAreaId then
+        local ok, spawns = pcall(Q.DB.QueryNPCSingle, npc, "spawns")
+        if ok and type(spawns) == "table" then
+            for areaId in pairs(spawns) do
+                local ok2, m = pcall(Q.Zone.GetUiMapIdByAreaId, Q.Zone, areaId)
+                if ok2 and m then
+                    maps = maps or {}
+                    maps[m] = true
+                end
+            end
+        end
+    end
+    npcMapCache[npc] = maps or false
+    return maps
+end
+
+--- Whether ForeverDB players' records show this NPC doesn't give the quest. Returns a reason when it doesn't.
+local function FdbWrongStarter(id, npc)
+    if not HasFdb() then return nil end
+    local q = FdbQuest(id)
+    if not q then return nil end
+    local npcMaps = NpcUiMaps(npc)
+    local onOfferMap = false
+    if npcMaps and q.hasOfferMaps then
+        for m in pairs(npcMaps) do if q.offerMaps[m] then onOfferMap = true end end
+    end
+    if q.startsSrc == "s" and #q.starts > 0 then
+        local listed = false
+        for _, ref in ipairs(q.starts) do if ref.k == "n" and ref.id == npc then listed = true end end
+        if listed then return nil end
+        if not onOfferMap then
+            local names = {}
+            for _, ref in ipairs(q.starts) do
+                tinsert(names, ref.k == "n" and NpcName(ref.id) or ref.k == "i" and format("item %d", ref.id)
+                    or format("object %d", ref.id))
+            end
+            return format("ForeverDB: players got it from %s, not %s", table.concat(names, ", "), NpcName(npc))
+        end
+    end
+    if npcMaps and q.hasOfferMaps and q.offerMapsSrc == "s" and not onOfferMap then
+        local where = {}
+        for m in pairs(q.offerMaps) do tinsert(where, MapName(m)) end
+        table.sort(where)
+        return format("ForeverDB: players were offered it in %s, but %s isn't there", table.concat(where, ", "), NpcName(npc))
+    end
+    return nil
+end
+
+--- HIDE when ForeverDB (or the community fix list) says this character can't take it yet,
+--- OK when the data knows its prerequisites and they're met, nil when the data has nothing to say.
+local function CheckForeverDB(id, why)
+    if not HasFdb() then return nil end
+    local q = FdbQuest(id)
+    local fix = ns.qff and ns.qff[id]
+    if not (q or fix) then return nil end
+    local me = Me()
+    local known = false
+
+    if q then
+        local fits, reason = FdbFits(q, me)
+        if not fits then tinsert(why, reason) return HIDE end
+        if FdbOfferRuledOut(id, me) then
+            tinsert(why, "ForeverDB: players saw its giver doesn't offer it to characters like you")
+            return HIDE
+        end
+        if q.gone then
+            tinsert(why, "ForeverDB: a Classic quest players have never been offered in Forever")
+            return HIDE
+        end
+        for _, p in ipairs(q.needAll) do
+            if not IsDone(p) then
+                -- "offered after" is an order players saw, not always a rule: it doesn't count when the earlier
+                -- quest isn't one this character can take (another race's or class's version)
+                local soft = false
+                if p == q.after then
+                    local pq = FdbQuest(p)
+                    soft = pq and (not FdbFits(pq, me) or FdbOfferRuledOut(p, me)) or false
+                end
+                if not soft then
+                    tinsert(why, format("ForeverDB: needs %s first", QuestName(p)))
+                    return HIDE
+                end
+            end
+            known = true
+        end
+        if #q.needAny > 0 then
+            local any
+            for _, p in ipairs(q.needAny) do if IsDone(p) then any = p break end end
+            if not any then
+                tinsert(why, format("ForeverDB: needs one of %s first", QuestName(q.needAny[1])))
+                return HIDE
+            end
+            known = true
+        end
+        local group = q.excl > 0 and ns.fdb.excl and ns.fdb.excl[q.excl]
+        if group then
+            for _, o in ipairs(Ids(group)) do
+                if o ~= id and IsDone(o) then
+                    tinsert(why, format("ForeverDB: you did %s, and only one of these can be done", QuestName(o)))
+                    return HIDE
+                end
+            end
+        end
+    end
+
+    if fix then
+        local single, all = Ids(fix[1]), Ids(fix[2])
+        if #single > 0 then
+            local any
+            for _, p in ipairs(single) do if IsDone(p) then any = p break end end
+            if not any then
+                tinsert(why, format("questie-forever-fixes: needs %s first", QuestName(single[1])))
+                return HIDE
+            end
+            known = true
+        end
+        for _, p in ipairs(all) do
+            if not IsDone(p) then
+                tinsert(why, format("questie-forever-fixes: needs %s first", QuestName(p)))
+                return HIDE
+            end
+            known = true
+        end
+    end
+
+    if known then
+        tinsert(why, "ForeverDB / community data: its prerequisites are done")
+        return OK
+    end
+    if q and q.forever and q.by > 0 and q.after == 0 then
+        tinsert(why, format("ForeverDB: %d players picked it up, none right after another quest", q.by))
+        return "weak"
+    end
+    return nil
+end
+
+QV.FdbQuest = FdbQuest
+
+---------------------------------------------------------------------------
 -- The verdict for one quest
 ---------------------------------------------------------------------------
 
@@ -458,7 +726,11 @@ local function Evaluate(quest)
         local wrong = db.wrongStarter[id]
         local marks = cdb.notOffered[id]
         for _, npc in ipairs(npcs) do
-            if wrong and wrong[npc] then
+            local fdbWrong = FdbWrongStarter(id, npc)
+            if fdbWrong then
+                dropped = true
+                tinsert(why, fdbWrong)
+            elseif wrong and wrong[npc] then
                 dropped = true
                 tinsert(why, format("%s doesn't give this quest (it was picked up elsewhere)", NpcName(npc)))
             elseif marks and marks[npc] then
@@ -498,6 +770,12 @@ local function Evaluate(quest)
     end
 
     local verdict
+    local fdbVerdict = CheckForeverDB(id, why)
+    if fdbVerdict == HIDE then return HIDE, why end
+    if fdbVerdict == OK then
+        if dimFromMark then return DIM, why, proxy end
+        return OK, why, proxy
+    end
     if settings.chains then
         verdict = CheckQuestLine(id, why)
         if verdict == HIDE then return HIDE, why end
@@ -518,6 +796,8 @@ local function Evaluate(quest)
     if verdict == nil then
         if QuestieHasChainInfo(id) then
             tinsert(why, "Questie knows its chain")
+        elseif fdbVerdict == "weak" then
+            -- (the reason is already in the list)
         elseif GloballyOffered(id, (proxy or quest).Starts and (proxy or quest).Starts.NPC) then
             tinsert(why, "this NPC has offered it on one of your characters")
         else
@@ -822,7 +1102,7 @@ function QV.Scan(all)
         GossipAvailableQuests = C_GossipInfo and C_GossipInfo.GetAvailableQuests and true or false,
     }
 
-    local counts = { total = 0, line = 0, btw = 0, questie = 0, none = 0, [HIDE] = 0, [DIM] = 0, [OK] = 0 }
+    local counts = { total = 0, line = 0, btw = 0, questie = 0, fdb = 0, none = 0, [HIDE] = 0, [DIM] = 0, [OK] = 0 }
     local rows = {}
     for id in pairs(Q.AQ.__availableQuests or {}) do
         local qMap = QuestUiMap(id)
@@ -833,16 +1113,18 @@ function QV.Scan(all)
                 local inLine = GetLine(id) ~= nil
                 local inBtw = btw and btw.quests[id] ~= nil or false
                 local hasPrereq = QuestieHasPrereq(id) and true or false
+                local inFdb = (FdbQuest(id) or (ns.qff and ns.qff[id])) and true or false
+                if inFdb then counts.fdb = counts.fdb + 1 end
                 if inLine then counts.line = counts.line + 1 end
                 if inBtw then counts.btw = counts.btw + 1 end
                 if hasPrereq then counts.questie = counts.questie + 1 end
-                if not (inLine or inBtw or hasPrereq) then counts.none = counts.none + 1 end
+                if not (inLine or inBtw or hasPrereq or inFdb) then counts.none = counts.none + 1 end
                 local okEval, verdict, why = pcall(Evaluate, quest)
                 if not okEval then verdict, why = OK, { "error: " .. tostring(verdict) } end
                 counts[verdict] = counts[verdict] + 1
                 tinsert(rows, {
                     id = id, name = QField(id, "name"), map = qMap,
-                    gameLine = inLine, btw = inBtw, questiePrereq = hasPrereq,
+                    gameLine = inLine, btw = inBtw, questiePrereq = hasPrereq, foreverdb = inFdb,
                     verdict = verdict, why = table.concat(why or {}, "; "),
                 })
             end
@@ -874,13 +1156,14 @@ function QV.Scan(all)
 
     local function yn(b) return b and "yes" or "|cffff5555no|r" end
     Print(format("scan of %s: Questie shows %d available quests.", where, counts.total))
-    Print(format("  in a game quest line: %d   in a BtWQuests chain: %d   Questie has a prerequisite: %d   none of these: %d",
-        counts.line, counts.btw, counts.questie, counts.none))
+    Print(format("  in ForeverDB data: %d   in a game quest line: %d   in a BtWQuests chain: %d   Questie has a prerequisite: %d   none of these: %d",
+        counts.fdb, counts.line, counts.btw, counts.questie, counts.none))
     Print(format("  result: %d hidden, %d dimmed, %d shown (dim mode: %s)", counts[HIDE], counts[DIM], counts[OK], db.settings.dim))
     Print("  game's own list of startable quest-line quests here: " .. lineSummary)
     Print(format("  APIs: GetQuestLineInfo %s, GetQuestLineQuests %s, GetAvailableQuestLines %s, gossip quest IDs %s; BtWQuests: %s",
         yn(api.GetQuestLineInfo), yn(api.GetQuestLineQuests), yn(api.GetAvailableQuestLines), yn(api.GossipAvailableQuests), btwSummary))
     Print("  full list saved; /qv why <questID> explains any one quest.")
+    if ns.fdb then Print("  " .. FDB_CREDIT) end
 end
 
 function QV.Why(id)
@@ -890,7 +1173,12 @@ function QV.Why(id)
     local okEval, verdict, why = pcall(Evaluate, quest)
     if not okEval then Print("error:", tostring(verdict)) return end
     Print(format("%s: %s", QuestName(id), VERDICT_LABEL[verdict]))
-    for _, reason in ipairs(why or {}) do Print("   - " .. reason) end
+    local credit = false
+    for _, reason in ipairs(why or {}) do
+        Print("   - " .. reason)
+        if reason:find("^ForeverDB") then credit = true end
+    end
+    if credit then Print("   " .. FDB_CREDIT) end
     if not (Q.AQ.__availableQuests or {})[id] then
         Print("   (Questie itself doesn't currently show it as available, so it has no marker either way)")
     end
@@ -910,6 +1198,9 @@ local function Help()
     print("      unverified = also quests no source can confirm")
     print("  /qv learn on|off  learn from what NPCs offer (now: " .. (db.settings.learn and "on" or "off") .. ")")
     print("  /qv chains on|off use quest-chain data (now: " .. (db.settings.chains and "on" or "off") .. ")")
+    print("  /qv foreverdb on|off  use ForeverDB.net data (now: " .. (db.settings.foreverdb and "on" or "off")
+        .. (ns.fdb and (", ForeverDB " .. tostring(ns.fdb.version) .. ")") or ", data file missing)"))
+    print("      " .. FDB_CREDIT)
     print("  /qv revisit <n>   levels before a 'not offered' marker comes back dimmed (now: " .. db.settings.revisitLevels .. ")")
     print("  /qv forget <id>   forget what was learned about a quest   |   /qv forget all")
     print("  /qv refresh       re-check every marker now")
@@ -934,7 +1225,7 @@ local function Slash(msg)
         else
             Print("usage: /qv dim off|uncertain|unverified")
         end
-    elseif cmd == "learn" or cmd == "chains" then
+    elseif cmd == "learn" or cmd == "chains" or cmd == "foreverdb" then
         local value = arg:lower()
         if value == "on" or value == "off" then
             db.settings[cmd] = (value == "on")

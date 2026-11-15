@@ -34,41 +34,38 @@ log, or needs a higher level, `/qv why` says so. A previous step counts once it'
 
 | What | Needed? | Where to get it |
 |---|---|---|
-| World of Warcraft: Forever | Required | |
-| [Questie](https://github.com/Questie/Questie) | Required | CurseForge or Wago (search "Questie") |
-| [ForeverDB addon](https://foreverdb.net/addon) | Strongly recommended: its quest data catches most wrong markers | CurseForge or Wago (search "ForeverDB"), or the zip from foreverdb.net |
-| [Python 3](https://www.python.org/downloads/) | Needed to run the installer, which builds the ForeverDB data | python.org (tick "Add Python to PATH") |
-| BtWQuests + BtWQuests: Classic | Optional | CurseForge or Wago |
+| World of Warcraft: Forever on Windows | Required | |
+| [Questie](https://github.com/Questie/Questie) | Required | CurseForge or Wago app (search "Questie") |
+| [ForeverDB addon](https://foreverdb.net/addon) | Strongly recommended: its quest data catches most wrong markers | CurseForge or Wago app (search "ForeverDB"), or the zip from foreverdb.net |
+| BtWQuests + BtWQuests: Classic | Optional | CurseForge or Wago app |
 | [questie-forever-fixes](https://github.com/xelblch/questie-forever-fixes) | Optional, adds 76 community prerequisites | GitHub |
+
+Nothing else is needed: the installer uses only what comes with Windows 10 and 11.
 
 ## Install
 
-1. Install **Questie** and the **ForeverDB** addon in WoW Forever (CurseForge or Wago is easiest).
-2. Download QuestieVerify: on GitHub, click **Code > Download ZIP**, then extract it anywhere.
-3. Open the extracted folder, click the address bar, type `cmd` and press Enter. In the window that opens, run:
+1. Install **Questie** and the **ForeverDB** addon (the CurseForge or Wago app is easiest).
+2. On this GitHub page, click the green **Code** button, then **Download ZIP**.
+3. Open your Downloads folder, right-click the ZIP and choose **Extract All...**, then **Extract**.
+4. In the extracted folder, double-click **Install QuestieVerify**.
+   - If Windows shows "Windows protected your PC", click **More info**, then **Run anyway**. Windows shows this
+     for any file downloaded from the internet that isn't from a big publisher.
+   - It finds WoW Forever by itself. If it can't, a window asks you to pick your World of Warcraft folder.
+   - If WoW is in Program Files, Windows asks whether to allow changes: click **Yes**.
+5. When it says **Done!**, press any key to close it. Then quit WoW completely and start it again
+   (not just `/reload`). Type `/qv` in game to see the commands.
 
-   ```
-   python install.py
-   ```
-
-   If WoW isn't in `C:\Program Files\World of Warcraft`, add its `_forever_` folder:
-   `python install.py "D:\Games\World of Warcraft\_forever_"`
-   If it says "Access is denied", open the command window as administrator and run it again.
-4. Restart WoW completely (not just `/reload`). Type `/qv` in game to see the commands.
-
-After ForeverDB updates, run `python install.py` again to refresh the data. You can turn the ForeverDB addon off in
-game if you don't want it running: the installer only reads its files.
-
-**Without Python:** rename the extracted folder from `QuestieVerify-main` to `QuestieVerify` and copy it into `World of Warcraft\_forever_\Interface\AddOns\`. It works,
-but without ForeverDB's data (only the game's quest lines, BtWQuests and what NPCs offer).
+**When ForeverDB updates**, QuestieVerify says so in chat once. Double-click **Install QuestieVerify** again to
+refresh its copy of the data. The installer only reads ForeverDB's files, so you can switch the ForeverDB addon off in
+game if you don't want it running.
 
 **Uninstall:** delete `Interface\AddOns\QuestieVerify`. Questie's own files are never changed.
 
 ## About the ForeverDB data
 
-The data file (`Data/ForeverDB.lua`) isn't in this repository: the installer builds it on your PC from your ForeverDB
-addon with `tools/build_data.py`. ForeverDB's data is GPL-3.0 with an attribution term. WoW Forever's own quest-line
-table is nearly empty (3 quest lines in client build 1.60.1), so ForeverDB is the main source.
+The data file (`Data/ForeverDB.lua`) isn't in this repository: the installer (`tools/install.ps1`) builds it on your
+PC from your ForeverDB addon. ForeverDB's data is GPL-3.0 with an attribution term. WoW Forever's own quest-line table
+is nearly empty (3 quest lines in client build 1.60.1), so ForeverDB is the main source.
 
 ## Commands
 

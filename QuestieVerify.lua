@@ -5,7 +5,7 @@
 -- wrong quest giver, you travel there for nothing. This add-on second-guesses each "!" before
 -- Questie draws it:
 --
---   0. ForeverDB.net data (Data/ForeverDB.lua, built locally by tools/build_data.py from the
+--   0. ForeverDB.net data (Data/ForeverDB.lua, built locally by the installer, tools/install.ps1, from the
 --      ForeverDB.net Companion addon) and xelblch/questie-forever-fixes: side, race and class,
 --      prerequisites, exclusive quests, who a quest isn't offered to, and who really gives it.
 --      Data from ForeverDB.net (https://foreverdb.net)
@@ -473,7 +473,7 @@ local function GloballyOffered(id, npcs)
 end
 
 ---------------------------------------------------------------------------
--- Source 0: ForeverDB.net data (Data/ForeverDB.lua, built locally by tools/build_data.py from the
+-- Source 0: ForeverDB.net data (Data/ForeverDB.lua, built locally by the installer, tools/install.ps1, from the
 -- ForeverDB.net Companion addon), plus xelblch/questie-forever-fixes prerequisites.
 -- Data from ForeverDB.net (https://foreverdb.net)
 ---------------------------------------------------------------------------
@@ -1660,6 +1660,23 @@ local function AutoScan()
     end)
 end
 
+-- The data file is built from the installed ForeverDB addon by the installer; say so once when it's missing or older.
+local function CheckFdbData()
+    local fc = _G.ForeverDB_Companion
+    local have = type(fc) == "table" and fc.version
+    if not have or not db or db.fdbNotice == have then return end
+    local built = ns.fdb and ns.fdb.version
+    if built == have then return end
+    db.fdbNotice = have
+    if built then
+        Print(format("ForeverDB was updated (%s to %s). To refresh QuestieVerify's copy of its data, quit WoW, "
+            .. "double-click 'Install QuestieVerify' again and restart WoW.", built, have))
+    else
+        Print("ForeverDB is installed, but QuestieVerify hasn't read its data yet. Quit WoW, double-click "
+            .. "'Install QuestieVerify' and restart WoW to catch many more wrong quest markers.")
+    end
+end
+
 local frame = CreateFrame("Frame")
 for _, event in ipairs({
     "ADDON_LOADED", "PLAYER_LOGIN", "PLAYER_ENTERING_WORLD", "ZONE_CHANGED_NEW_AREA",
@@ -1683,6 +1700,7 @@ frame:SetScript("OnEvent", function(_, event, ...)
         return
     elseif event == "PLAYER_LOGIN" then
         loggedIn = true
+        C_Timer.After(12, CheckFdbData)
     elseif event == "PLAYER_ENTERING_WORLD" then
         RequestLines()
         if firstWorld then

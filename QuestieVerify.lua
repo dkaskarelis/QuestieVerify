@@ -903,7 +903,9 @@ end
 local unlocks = {}     -- [root quest] = { [blocked quest] = true }
 local redirectOf = {}  -- [blocked quest] = root quest
 local forced = {}      -- [root quest] = true: its marker was drawn by QuestieVerify, not Questie
+local extraLocked = {} -- [quest] = key: red markers QuestieVerify drew for chain steps Questie doesn't list itself
 local hookedDraw       -- the wrapped DrawAvailableQuest
+local rawDraw          -- Questie's own DrawAvailableQuest
 local redirecting = false
 
 local function QuestieBlocker(id)
@@ -919,6 +921,26 @@ local function QuestieBlocker(id)
         for _, p in ipairs(group) do if not IsComplete(p) then return p end end
     end
     return nil
+end
+
+--- Evaluate, plus Questie's own prerequisites. Questie checks those itself before it asks QuestieVerify about
+--- a quest, so Evaluate doesn't; this is for the quests Questie leaves out (chain steps, /qv why).
+local function EvaluateWithPrereqs(quest)
+    local verdict, why, proxy = Evaluate(quest)
+    if verdict ~= HIDE then
+        local blocker = QuestieBlocker(quest.Id)
+        if blocker then
+            local kept = {}
+            for _, reason in ipairs(why or {}) do
+                if not reason:find("^Questie has its own prerequisite") then tinsert(kept, reason) end
+            end
+            why = kept
+            tinsert(why, format("Questie: needs %s first", QuestName(blocker)))
+            why.blocker = blocker
+            return HIDE, why
+        end
+    end
+    return verdict, why, proxy
 end
 
 --- Whether Questie's settings hide quests like this one (repeatable, dungeon, raid, PvP).
@@ -1101,7 +1123,7 @@ end
 local function PruneRedirects()
     local available = Q.AQ and Q.AQ.__availableQuests or {}
     for id in pairs(redirectOf) do
-        if not available[id] then ClearRedirect(id) end
+        if not (available[id] or extraLocked[id]) then ClearRedirect(id) end
     end
     for root in pairs(unlocks) do
         if IsComplete(root) or InLog(root) then
@@ -1146,15 +1168,15 @@ local function LockedLine(id, blocker)
     local root, reason, at = CachedRoot(blocker)
     local text
     if root then
-        text = format("first pick up %s%s", QuestTitle(root), StarterText(root))
+        text = format("first pick up %s%s", QuestName(root), StarterText(root))
     elseif reason == "log" then
-        text = format("first hand in %s (it's in your quest log)", QuestTitle(at))
+        text = format("first hand in %s (it's in your quest log)", QuestName(at))
     elseif reason == "level" then
-        text = format("first do %s%s, from level %d", QuestTitle(at), StarterText(at), QField(at, "requiredLevel") or 0)
+        text = format("first do %s%s, from level %d", QuestName(at), StarterText(at), QField(at, "requiredLevel") or 0)
     else
         text = "an earlier step of this chain isn't done"
     end
-    return format("|cffff7755QuestieVerify: %s is locked:|r %s", QuestTitle(id), text)
+    return format("|cffff7755QuestieVerify: %s is locked:|r %s", QuestName(id), text)
 end
 
 --- [NPC name] = { locked quests whose red marker was left out at that NPC because it has a real "!" }
@@ -1162,7 +1184,7 @@ local function LockedAtNpcs()
     local available = Q.AQ and Q.AQ.__availableQuests or {}
     local byName = {}
     for id, st in pairs(status) do
-        if st.lockedAt and available[id] then
+        if st.lockedAt and (available[id] or extraLocked[id]) then
             for _, npc in ipairs(st.lockedAt) do
                 local ok, name = pcall(Q.DB.QueryNPCSingle, npc, "name")
                 if ok and name then
@@ -1207,11 +1229,11 @@ local function AddUnlockLines(tooltip)
             if root and unlocks[root] and not done[root] then
                 done[root] = true
                 local names = {}
-                for id in pairs(unlocks[root]) do tinsert(names, QuestTitle(id)) end
+                for id in pairs(unlocks[root]) do tinsert(names, QuestName(id)) end
                 table.sort(names)
                 if #names > 0 then
                     if not added then tooltip:AddLine(" ") end
-                    tooltip:AddLine(format("|cff33ff99QuestieVerify:|r %s unlocks %s", QuestTitle(root), table.concat(names, ", ")),
+                    tooltip:AddLine(format("|cff33ff99QuestieVerify:|r %s unlocks %s", QuestName(root), table.concat(names, ", ")),
                         1, 0.82, 0, true)
                     added = true
                 end
@@ -1355,6 +1377,170 @@ local function RecheckLocked()
     if next(changed) then Redraw(changed) end
 end
 
+--- Draws a locked quest's red marker; not at NPCs that have a real "!" (the red one could cover it), where it's
+--- listed in that "!"'s tooltip instead (lockedAt). Returns whether a marker was drawn.
+local function DrawLocked(quest, why)
+    local starts, excluded, lockedAt = LockedStarts(quest, ShownNpcs())
+    if starts then
+        status[quest.Id] = { verdict = LOCK, why = why, root = redirectOf[quest.Id], blocker = why.blocker,
+            excluded = excluded, lockedAt = lockedAt }
+        rawDraw(setmetatable({ Starts = starts }, { __index = quest }))
+        return true
+    end
+    status[quest.Id] = { verdict = HIDE, why = why, root = redirectOf[quest.Id], blocker = why.blocker,
+        lockedAt = lockedAt }
+    return false
+end
+
+-- Chain steps Questie leaves out. Questie only asks QuestieVerify about quests whose prerequisites it thinks are
+-- done, so the later steps of a chain it knows never reach the hook. They're found here instead: the quests that
+-- need one you can pick up now or have in your log, then the ones after those.
+
+local childrenOf        -- [quest] = { quests whose Questie prerequisites include it }, built once after login
+local childrenBuilding = false
+local CHAIN_DEPTH = 4   -- how many steps past a quest you can pick up still get a red marker
+local LEVELS_AHEAD = 5  -- no red marker for steps more than this many levels above you
+
+--- Builds childrenOf a few hundred quests at a time, so logging in doesn't stall.
+local function BuildChildren(done)
+    if childrenOf or childrenBuilding then return end
+    local pointers = Q.DB and Q.DB.QuestPointers
+    if type(pointers) ~= "table" then return end
+    childrenBuilding = true
+    local index, key = {}, nil
+    local function Add(parent, child)
+        if type(parent) ~= "number" then return end
+        index[parent] = index[parent] or {}
+        tinsert(index[parent], child)
+    end
+    local function Step()
+        for _ = 1, 400 do
+            key = next(pointers, key)
+            if key == nil then
+                childrenOf, childrenBuilding = index, false
+                if done then done() end
+                return
+            end
+            for _, field in ipairs({ "preQuestSingle", "preQuestGroup" }) do
+                local list = QField(key, field)
+                if type(list) == "table" then
+                    for _, p in ipairs(list) do Add(p, key) end
+                end
+            end
+        end
+        C_Timer.After(0, Step)
+    end
+    Step()
+end
+
+local function LogQuestIds()
+    local ids = {}
+    if C_QuestLog and C_QuestLog.GetNumQuestLogEntries and C_QuestLog.GetInfo then
+        for i = 1, (C_QuestLog.GetNumQuestLogEntries() or 0) do
+            local info = C_QuestLog.GetInfo(i)
+            if info and not info.isHeader and (info.questID or 0) > 0 then tinsert(ids, info.questID) end
+        end
+    elseif GetNumQuestLogEntries and GetQuestLogTitle then
+        for i = 1, (GetNumQuestLogEntries() or 0) do
+            local _, _, _, isHeader, _, _, _, questID = GetQuestLogTitle(i)
+            if not isHeader and (questID or 0) > 0 then tinsert(ids, questID) end
+        end
+    end
+    return ids
+end
+
+--- Whether a chain step could be a quest for this character at all, apart from its earlier steps.
+local function ChainStepFits(id, available)
+    if available[id] or IsComplete(id) or InLog(id) then return false end
+    local char = Questie and Questie.db and Questie.db.char
+    if char and char.hidden and char.hidden[id] then return false end
+    if Q.DB.autoBlacklist and Q.DB.autoBlacklist[id] then return false end
+    if Q.Corr and Q.Corr.hiddenQuests and Q.Corr.hiddenQuests[id] then return false end
+    if not PlayerCanDo(id) then return false end
+    if (QField(id, "requiredLevel") or 0) > PlayerLevel() + LEVELS_AHEAD then return false end
+    for _, other in ipairs(QField(id, "exclusiveTo") or {}) do
+        if IsDone(other) then return false end
+    end
+    return not FilteredByQuestie(id)
+end
+
+--- The chain steps that should have a red marker: up to CHAIN_DEPTH steps past each quest you can pick up now or
+--- have in your log.
+local function ChainSteps()
+    local available = Q.AQ.__availableQuests or {}
+    local want, queue, depth = {}, {}, {}
+    local function Seed(id)
+        if depth[id] == nil then depth[id] = 0; tinsert(queue, id) end
+    end
+    for id in pairs(available) do Seed(id) end
+    for _, id in ipairs(LogQuestIds()) do Seed(id) end
+    local i = 1
+    while queue[i] do
+        local p = queue[i]
+        i = i + 1
+        if depth[p] < CHAIN_DEPTH then
+            for _, c in ipairs(childrenOf[p] or {}) do
+                if depth[c] == nil then
+                    depth[c] = depth[p] + 1
+                    if ChainStepFits(c, available) then
+                        want[c] = true
+                        tinsert(queue, c)
+                    end
+                end
+            end
+        end
+    end
+    return want
+end
+
+local function DropExtra(id)
+    extraLocked[id] = nil
+    status[id] = nil
+    ClearRedirect(id)
+    UnloadMarker(id)
+end
+
+--- After each Questie pass: draws, updates and removes the red markers of chain steps Questie leaves out.
+local function DrawLockedChains()
+    if not (childrenOf and rawDraw and QuestieReady()) then return end
+    local available = Q.AQ.__availableQuests or {}
+    local want = db.settings.redirect and ChainSteps() or {}
+    local nowAvailable = {}
+    for id in pairs(extraLocked) do
+        if not want[id] then
+            DropExtra(id)
+            -- (Questie skipped it this pass because our red marker was there: let it draw its own)
+            if available[id] then nowAvailable[id] = true end
+        end
+    end
+    local shown = ShownNpcs()
+    for id in pairs(want) do
+        local okQ, quest = pcall(Q.DB.GetQuest, id)
+        local final, why
+        if okQ and quest then
+            local okE, verdict, w = pcall(EvaluateWithPrereqs, quest)
+            if okE and verdict == HIDE and w and w.blocker then
+                why = w
+                local okF, f = pcall(FinalVerdict, id, verdict, why)
+                if okF then final = f end
+            end
+        end
+        if final == LOCK then
+            pcall(Redirect, id, why)
+            local root, reason, at = CachedRoot(why.blocker)
+            local key = select(2, LockedStarts(quest, shown)) .. "|" .. tostring(root or at) .. "|" .. tostring(reason)
+            if extraLocked[id] ~= key or (status[id] and status[id].verdict == LOCK and not HasMarker(id)) then
+                UnloadMarker(id)
+                extraLocked[id] = key
+                pcall(DrawLocked, quest, why)
+            end
+        elseif extraLocked[id] then
+            DropExtra(id)
+        end
+    end
+    if next(nowAvailable) then Redraw(nowAvailable) end
+end
+
 ---------------------------------------------------------------------------
 -- Hooks into Questie
 ---------------------------------------------------------------------------
@@ -1373,7 +1559,9 @@ local function InstallHooks()
         return false
     end
 
+    Q.Corr = Import("QuestieCorrections")
     local originalDraw = Q.AQ.DrawAvailableQuest
+    rawDraw = originalDraw
     Q.AQ.DrawAvailableQuest = function(quest)
         if not (quest and quest.Id and db) then return originalDraw(quest) end
         local ok, verdict, why, proxy = pcall(Evaluate, quest)
@@ -1388,17 +1576,8 @@ local function InstallHooks()
             pcall(Redirect, quest.Id, why)
             local okL, final = pcall(FinalVerdict, quest.Id, verdict, why)
             if okL and final == LOCK then
-                -- keep this quest's marker, drawn red, with a tooltip line naming the step to do first;
-                -- not at NPCs that have a real "!" (the red one could cover it)
-                -- (at those NPCs it's listed in the real "!"'s tooltip instead: lockedAt)
-                local starts, excluded, lockedAt = LockedStarts(quest, ShownNpcs())
-                if starts then
-                    status[quest.Id] = { verdict = LOCK, why = why, root = redirectOf[quest.Id], blocker = why.blocker,
-                        excluded = excluded, lockedAt = lockedAt }
-                    return originalDraw(setmetatable({ Starts = starts }, { __index = quest }))
-                end
-                status[quest.Id] = { verdict = HIDE, why = why, root = redirectOf[quest.Id], blocker = why.blocker,
-                    lockedAt = lockedAt }
+                -- keep this quest's marker, drawn red, with a tooltip line naming the step to do first
+                DrawLocked(quest, why)
                 return
             end
             status[quest.Id] = { verdict = verdict, why = why, root = redirectOf[quest.Id] }
@@ -1430,6 +1609,7 @@ local function InstallHooks()
             rootCache = {}
             return originalCalc(function(...)
                 pcall(PruneRedirects)
+                pcall(DrawLockedChains)
                 pcall(RecheckLocked)
                 if callback then return callback(...) end
             end, ...)
@@ -1470,6 +1650,7 @@ local function InstallHooks()
     end
 
     hooked = true
+    BuildChildren(function() pcall(DrawLockedChains) end)
     return true
 end
 
@@ -1745,7 +1926,7 @@ function QV.Why(id)
     if not QuestieReady() then Print("Questie hasn't finished loading yet.") return end
     local ok, quest = pcall(Q.DB.GetQuest, id)
     if not (ok and quest) then Print(format("Questie doesn't know quest %d.", id)) return end
-    local okEval, verdict, why = pcall(Evaluate, quest)
+    local okEval, verdict, why = pcall(EvaluateWithPrereqs, quest)
     if not okEval then Print("error:", tostring(verdict)) return end
     if verdict == HIDE and why.blocker and db.settings.redirect then pcall(ResolveRoot, why.blocker, why) end
     local okF, final = pcall(FinalVerdict, id, verdict, why)
@@ -1761,7 +1942,9 @@ function QV.Why(id)
         if reason:find("^ForeverDB") then credit = true end
     end
     if credit then Print("   " .. FDB_CREDIT) end
-    if not (Q.AQ.__availableQuests or {})[id] then
+    if extraLocked[id] then
+        Print("   (a step of a chain Questie knows: QuestieVerify draws its red marker itself)")
+    elseif not (Q.AQ.__availableQuests or {})[id] then
         Print("   (Questie itself doesn't currently show it as available, so it has no marker either way)")
     end
 end
@@ -2002,7 +2185,8 @@ end)
 
 -- Exposed for debugging: /dump QuestieVerify.status[questId]
 QV.status = status
-QV._internal = { ApplyDim = ApplyDim }   -- for the test harness only; not an API
+QV._internal = { ApplyDim = ApplyDim,   -- for the test harness only; not an API
+    RebuildChildren = function() childrenOf = nil; BuildChildren() end }
 function QV.ClearCaches() rootCache = {} end
 QV.lineAvailable = lineAvailable
 function QV.GetBtWIndex() EnsureBtW() return btw end

@@ -36,8 +36,9 @@ to the first quest you can pick up now (step 1 in a chain of steps 1, 2 and 3):
 - When the NPC of a later step also has a normal "!" for another quest, no red marker is drawn there (it could
   cover the real one). Instead, that "!"'s tooltip lists the locked quest and the quest to do first.
 
-A previous step counts once it's handed in, not while it's in your log. QuestieVerify only does this for quests
-Questie would otherwise show: when Questie already knows the chain, it shows only step 1, as usual.
+A previous step counts once it's handed in, not while it's in your log. This works for chains Questie knows too
+(Questie itself would show only step 1): red markers go on up to 4 steps past a quest you can pick up now or have
+in your log, and not on steps more than 5 levels above you. Quest names in these tooltips come with their IDs.
 `/qv redirect off` hides blocked quests instead.
 
 **Automatic scans.** Each zone you enter is scanned quietly (no chat output) and saved in the SavedVariables file, so

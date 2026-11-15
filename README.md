@@ -30,26 +30,45 @@ log, or needs a higher level, `/qv why` says so. A previous step counts once it'
 **Automatic scans.** Each zone you enter is scanned quietly (no chat output) and saved in the SavedVariables file, so
 `/qv scan` is only needed to see the summary in chat.
 
-## ForeverDB data (local build)
+## Prerequisites
 
-The ForeverDB data file isn't in this repository. Build it yourself from the free
-[ForeverDB.net Companion addon](https://foreverdb.net/addon) (GPL-3.0 with an attribution term):
-
-```
-python tools/build_data.py <path to the ForeverDB addon folder> [<path to questie-forever-fixes>]
-```
-
-This writes `Data/ForeverDB.lua`. Without it, QuestieVerify works with its other sources. Note: WoW Forever's own
-quest-line table is nearly empty (3 quest lines in client build 1.60.1), so source 1 rarely helps; ForeverDB is the
-main source.
-
-QuestieVerify doesn't modify Questie's files. It wraps two Questie functions at runtime, so uninstalling is just
-deleting the folder.
+| What | Needed? | Where to get it |
+|---|---|---|
+| World of Warcraft: Forever | Required | |
+| [Questie](https://github.com/Questie/Questie) | Required | CurseForge or Wago (search "Questie") |
+| [ForeverDB addon](https://foreverdb.net/addon) | Strongly recommended: its quest data catches most wrong markers | CurseForge or Wago (search "ForeverDB"), or the zip from foreverdb.net |
+| [Python 3](https://www.python.org/downloads/) | Needed to run the installer, which builds the ForeverDB data | python.org (tick "Add Python to PATH") |
+| BtWQuests + BtWQuests: Classic | Optional | CurseForge or Wago |
+| [questie-forever-fixes](https://github.com/xelblch/questie-forever-fixes) | Optional, adds 76 community prerequisites | GitHub |
 
 ## Install
 
-Copy the `QuestieVerify` folder into `World of Warcraft\_forever_\Interface\AddOns\` and restart the game.
-Requires Questie. BtWQuests (with BtWQuests: Classic) is optional.
+1. Install **Questie** and the **ForeverDB** addon in WoW Forever (CurseForge or Wago is easiest).
+2. Download QuestieVerify: on GitHub, click **Code > Download ZIP**, then extract it anywhere.
+3. Open the extracted folder, click the address bar, type `cmd` and press Enter. In the window that opens, run:
+
+   ```
+   python install.py
+   ```
+
+   If WoW isn't in `C:\Program Files\World of Warcraft`, add its `_forever_` folder:
+   `python install.py "D:\Games\World of Warcraft\_forever_"`
+   If it says "Access is denied", open the command window as administrator and run it again.
+4. Restart WoW completely (not just `/reload`). Type `/qv` in game to see the commands.
+
+After ForeverDB updates, run `python install.py` again to refresh the data. You can turn the ForeverDB addon off in
+game if you don't want it running: the installer only reads its files.
+
+**Without Python:** rename the extracted folder from `QuestieVerify-main` to `QuestieVerify` and copy it into `World of Warcraft\_forever_\Interface\AddOns\`. It works,
+but without ForeverDB's data (only the game's quest lines, BtWQuests and what NPCs offer).
+
+**Uninstall:** delete `Interface\AddOns\QuestieVerify`. Questie's own files are never changed.
+
+## About the ForeverDB data
+
+The data file (`Data/ForeverDB.lua`) isn't in this repository: the installer builds it on your PC from your ForeverDB
+addon with `tools/build_data.py`. ForeverDB's data is GPL-3.0 with an attribution term. WoW Forever's own quest-line
+table is nearly empty (3 quest lines in client build 1.60.1), so ForeverDB is the main source.
 
 ## Commands
 

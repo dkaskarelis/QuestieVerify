@@ -129,6 +129,14 @@ local function IsDone(id)
     return IsComplete(id) or InLog(id)
 end
 
+--- The first quest of the list that's handed in, or nil.
+local function AnyComplete(list)
+    for _, q in ipairs(list or {}) do
+        if IsComplete(q) then return q end
+    end
+    return nil
+end
+
 --- Whether this character's race and class can take the quest (true when Questie doesn't know it).
 local function PlayerCanDo(id)
     if not Q.Player then return true end
@@ -239,6 +247,11 @@ local function CheckQuestLine(id, why)
     if IsComplete(p1) then
         tinsert(why, format("game quest line '%s': previous step %s is done", lineName, QuestName(p1)))
         return OK
+    end
+    if InLog(p1) then
+        tinsert(why, format("game quest line '%s': previous step %s is still in your quest log", lineName, QuestName(p1)))
+        why.blocker = p1
+        return HIDE
     end
     if p2 and IsComplete(p2) then
         -- Quest lines are flat lists; parallel steps look sequential. Not sure enough to hide.
@@ -483,6 +496,29 @@ local function HasBit(mask, n)
     return math.floor(mask / 2 ^ (n - 1)) % 2 == 1
 end
 
+local exclCache, fixCache = {}, {}
+
+local function ExclGroup(g)
+    if not (g and g > 0 and ns.fdb and ns.fdb.excl) then return nil end
+    local c = exclCache[g]
+    if c == nil then
+        c = ns.fdb.excl[g] and Ids(ns.fdb.excl[g]) or false
+        exclCache[g] = c
+    end
+    return c or nil
+end
+
+local function FixLists(id)
+    if not ns.qff then return nil end
+    local c = fixCache[id]
+    if c == nil then
+        local fix = ns.qff[id]
+        c = fix and { single = Ids(fix[1]), all = Ids(fix[2]) } or false
+        fixCache[id] = c
+    end
+    return c or nil
+end
+
 local function HasFdb()
     return ns.fdb and ns.fdb.quests and db.settings.foreverdb ~= false
 end
@@ -599,7 +635,9 @@ local function NpcUiMaps(npc)
     return maps
 end
 
---- Whether ForeverDB players' records show this NPC doesn't give the quest. Returns a reason when it doesn't.
+--- Whether ForeverDB players' records show this NPC doesn't give the quest. Returns a reason when it doesn't,
+--- and whether the evidence is strong (several players got it from someone else) or only a map mismatch,
+--- which can be wrong for city NPCs and quests with several givers.
 local function FdbWrongStarter(id, npc)
     if not HasFdb() then return nil end
     local q = FdbQuest(id)
@@ -619,16 +657,28 @@ local function FdbWrongStarter(id, npc)
                 tinsert(names, ref.k == "n" and NpcName(ref.id) or ref.k == "i" and format("item %d", ref.id)
                     or format("object %d", ref.id))
             end
-            return format("ForeverDB: players got it from %s, not %s", table.concat(names, ", "), NpcName(npc))
+            return format("ForeverDB: players got it from %s, not %s", table.concat(names, ", "), NpcName(npc)), (q.by or 0) >= 3
         end
     end
     if npcMaps and q.hasOfferMaps and q.offerMapsSrc == "s" and not onOfferMap then
         local where = {}
         for m in pairs(q.offerMaps) do tinsert(where, MapName(m)) end
         table.sort(where)
-        return format("ForeverDB: players were offered it in %s, but %s isn't there", table.concat(where, ", "), NpcName(npc))
+        return format("ForeverDB: players were offered it in %s, but %s isn't there", table.concat(where, ", "), NpcName(npc)), false
     end
     return nil
+end
+
+--- Whether this character can never take quest p (another side/race/class, not offered to them, gone from
+--- Forever, or a quest of its exclusive group is already done or taken).
+local function FdbNeverTakeable(p, me)
+    local pq = FdbQuest(p)
+    if not pq then return false end
+    if not FdbFits(pq, me) or FdbOfferRuledOut(p, me) or pq.gone then return true end
+    for _, o in ipairs(ExclGroup(pq.excl) or {}) do
+        if o ~= p and IsDone(o) then return true end
+    end
+    return false
 end
 
 --- HIDE when ForeverDB (or the community fix list) says this character can't take it yet,
@@ -636,7 +686,7 @@ end
 local function CheckForeverDB(id, why)
     if not HasFdb() then return nil end
     local q = FdbQuest(id)
-    local fix = ns.qff and ns.qff[id]
+    local fix = FixLists(id)
     if not (q or fix) then return nil end
     local me = Me()
     local known = false
@@ -656,11 +706,7 @@ local function CheckForeverDB(id, why)
             if not IsComplete(p) then
                 -- "offered after" is an order players saw, not always a rule: it doesn't count when the earlier
                 -- quest isn't one this character can take (another race's or class's version)
-                local soft = false
-                if p == q.after then
-                    local pq = FdbQuest(p)
-                    soft = pq and (not FdbFits(pq, me) or FdbOfferRuledOut(p, me)) or false
-                end
+                local soft = p == q.after and not InLog(p) and FdbNeverTakeable(p, me)
                 if not soft then
                     tinsert(why, format("ForeverDB: needs %s first", QuestName(p)))
                     why.blocker = p
@@ -670,9 +716,7 @@ local function CheckForeverDB(id, why)
             known = true
         end
         if #q.needAny > 0 then
-            local any
-            for _, p in ipairs(q.needAny) do if IsComplete(p) then any = p break end end
-            if not any then
+            if not AnyComplete(q.needAny) then
                 local pick = q.needAny[1]
                 for _, p in ipairs(q.needAny) do
                     local pq = FdbQuest(p)
@@ -684,9 +728,9 @@ local function CheckForeverDB(id, why)
             end
             known = true
         end
-        local group = q.excl > 0 and ns.fdb.excl and ns.fdb.excl[q.excl]
+        local group = ExclGroup(q.excl)
         if group then
-            for _, o in ipairs(Ids(group)) do
+            for _, o in ipairs(group) do
                 if o ~= id and IsDone(o) then
                     tinsert(why, format("ForeverDB: you did %s, and only one of these can be done", QuestName(o)))
                     return HIDE
@@ -696,11 +740,9 @@ local function CheckForeverDB(id, why)
     end
 
     if fix then
-        local single, all = Ids(fix[1]), Ids(fix[2])
+        local single, all = fix.single, fix.all
         if #single > 0 then
-            local any
-            for _, p in ipairs(single) do if IsComplete(p) then any = p break end end
-            if not any then
+            if not AnyComplete(single) then
                 tinsert(why, format("questie-forever-fixes: needs %s first", QuestName(single[1])))
                 why.blocker = single[1]
                 return HIDE
@@ -749,11 +791,16 @@ local function Evaluate(quest)
         local keep, dropped = {}, false
         local wrong = db.wrongStarter[id]
         local marks = cdb.notOffered[id]
+        local offered = db.offeredBy[id]
+        local weak = {}
         for _, npc in ipairs(npcs) do
-            local fdbWrong = FdbWrongStarter(id, npc)
-            if fdbWrong then
+            local fdbWrong, strong
+            if not (offered and offered[npc]) then fdbWrong, strong = FdbWrongStarter(id, npc) end
+            if fdbWrong and strong then
                 dropped = true
                 tinsert(why, fdbWrong)
+            elseif fdbWrong then
+                tinsert(weak, { npc = npc, why = fdbWrong })
             elseif wrong and wrong[npc] then
                 dropped = true
                 tinsert(why, format("%s doesn't give this quest (it was picked up elsewhere)", NpcName(npc)))
@@ -769,6 +816,18 @@ local function Evaluate(quest)
                 end
             else
                 tinsert(keep, npc)
+            end
+        end
+        if #weak > 0 then
+            if #keep > 0 or starts.GameObject or starts.Item then
+                dropped = true
+                for _, w in ipairs(weak) do tinsert(why, w.why) end
+            else
+                for _, w in ipairs(weak) do
+                    tinsert(keep, w.npc)
+                    tinsert(why, w.why .. " (kept, dimmed: no other giver is known)")
+                end
+                dimFromMark = true
             end
         end
         if dropped then
@@ -848,9 +907,7 @@ local redirecting = false
 local function QuestieBlocker(id)
     local single = QField(id, "preQuestSingle")
     if type(single) == "table" and #single > 0 then
-        local any = false
-        for _, p in ipairs(single) do if IsComplete(p) then any = true break end end
-        if not any then
+        if not AnyComplete(single) then
             for _, p in ipairs(single) do if InLog(p) or PlayerCanDo(p) then return p end end
             return single[1]
         end
@@ -860,6 +917,23 @@ local function QuestieBlocker(id)
         for _, p in ipairs(group) do if not IsComplete(p) then return p end end
     end
     return nil
+end
+
+--- Whether Questie's settings hide quests like this one (repeatable, dungeon, raid, PvP).
+local function FilteredByQuestie(p)
+    local prof = Questie and Questie.db and Questie.db.profile
+    if not (prof and Q.DB) then return false end
+    local function is(name)
+        local f = Q.DB[name]
+        if not f then return false end
+        local ok, r = pcall(f, p)
+        return ok and r and true or false
+    end
+    if prof.showRepeatableQuests == false and is("IsRepeatable") then return true end
+    if prof.showDungeonQuests == false and is("IsDungeonQuest") then return true end
+    if prof.showRaidQuests == false and is("IsRaidQuest") then return true end
+    if prof.showPvPQuests == false and is("IsPvPQuest") then return true end
+    return false
 end
 
 --- The first quest of the chain leading to `p` that this character can pick up now.
@@ -883,6 +957,7 @@ local function FindRoot(p)
             else
                 local req = QField(p, "requiredLevel") or 0
                 if req > PlayerLevel() then return nil, "level", p end
+                if not (Q.AQ.__availableQuests or {})[p] and FilteredByQuestie(p) then return nil, "filtered", p end
                 if Q.DB.IsDoable then
                     local okD, doable = pcall(Q.DB.IsDoable, p)
                     if okD and doable == false then return nil, "cant", p end
@@ -893,6 +968,47 @@ local function FindRoot(p)
         p = nextP
     end
     return nil, "cant", p
+end
+
+-- FindRoot results, cleared when Questie starts a new pass and after quest events.
+local rootCache = {}
+
+local function CachedRoot(p)
+    local c = rootCache[p]
+    if not c then
+        local root, reason, at = FindRoot(p)
+        c = { root = root, reason = reason, at = at }
+        rootCache[p] = c
+    end
+    return c.root, c.reason, c.at
+end
+
+--- Explains where a quest blocked by `blocker` leads; returns the quest to point to, if any.
+local function ResolveRoot(blocker, why)
+    local root, reason, at = CachedRoot(blocker)
+    if root then
+        tinsert(why, format("its marker points to %s instead: pick that up first", QuestName(root)))
+    elseif reason == "log" then
+        tinsert(why, format("%s is in your quest log: hand it in first", QuestName(at)))
+    elseif reason == "level" then
+        tinsert(why, format("the first step, %s, needs level %d", QuestName(at), QField(at, "requiredLevel") or 0))
+    elseif reason == "filtered" then
+        tinsert(why, format("the first step, %s, is a kind of quest your Questie settings hide", QuestName(at)))
+    elseif reason == "cant" then
+        tinsert(why, format("no step of the chain can be picked up now (stopped at %s)", QuestName(at)))
+    end
+    return root
+end
+
+--- Whether Questie has an available-quest marker drawn for this quest right now.
+local function HasMarker(id)
+    if not (Q.Map and Q.Map.GetFramesForQuest) then return false end
+    local ok, frames = pcall(Q.Map.GetFramesForQuest, Q.Map, id)
+    if not (ok and type(frames) == "table") then return false end
+    for _, f in pairs(frames) do
+        if f and f.data and f.data.Type == "available" then return true end
+    end
+    return false
 end
 
 local function UnloadMarker(id)
@@ -928,24 +1044,14 @@ end
 local function Redirect(id, why)
     local blocker = why.blocker
     if not (blocker and db.settings.redirect) or redirecting then ClearRedirect(id) return end
-    local root, reason, at = FindRoot(blocker)
-    if not root then
-        ClearRedirect(id)
-        if reason == "log" then
-            tinsert(why, format("%s is in your quest log: hand it in first", QuestName(at)))
-        elseif reason == "level" then
-            tinsert(why, format("the first step, %s, needs level %d", QuestName(at), QField(at, "requiredLevel") or 0))
-        elseif reason == "cant" then
-            tinsert(why, format("no step of the chain can be picked up now (stopped at %s)", QuestName(at)))
-        end
-        return
-    end
+    local root = ResolveRoot(blocker, why)
+    if not root then ClearRedirect(id) return end
     if redirectOf[id] ~= root then ClearRedirect(id) end
     redirectOf[id] = root
     unlocks[root] = unlocks[root] or {}
     unlocks[root][id] = true
-    tinsert(why, format("its marker points to %s instead: pick that up first", QuestName(root)))
-    if not (Q.AQ.__availableQuests or {})[root] and not forced[root] and hookedDraw then
+    -- (checks the map itself: Questie can drop markers on a full reset without telling anyone)
+    if not (Q.AQ.__availableQuests or {})[root] and not HasMarker(root) and hookedDraw then
         local okQ, rootQuest = pcall(Q.DB.GetQuest, root)
         if okQ and rootQuest then
             forced[root] = true
@@ -956,8 +1062,13 @@ local function Redirect(id, why)
     end
 end
 
---- After a quest is accepted or handed in: drop markers QuestieVerify drew for quests now done or taken.
+--- After a Questie pass or a quest event: drop pointers from quests Questie no longer lists, and markers
+--- QuestieVerify drew for quests now done or taken.
 local function PruneRedirects()
+    local available = Q.AQ and Q.AQ.__availableQuests or {}
+    for id in pairs(redirectOf) do
+        if not available[id] then ClearRedirect(id) end
+    end
     for root in pairs(unlocks) do
         if IsComplete(root) or InLog(root) then
             for id in pairs(unlocks[root]) do redirectOf[id] = nil end
@@ -1039,6 +1150,7 @@ end
 --- Throw away the drawn "!" of these quests (nil = all) and let Questie redraw them through our check.
 local function Redraw(questIds)
     if not QuestieReady() then return end
+    rootCache = {}
     if questIds == nil then
         ClearAllRedirects()
         questIds = {}
@@ -1096,8 +1208,22 @@ local function InstallHooks()
     if MIT and MIT.ShowOnTooltip then
         local originalShow = MIT.ShowOnTooltip
         MIT.ShowOnTooltip = function(self, tooltip, ...)
+            local before = tooltip and tooltip._Rebuild
             originalShow(self, tooltip, ...)
-            pcall(DecorateTooltip, tooltip)
+            -- Questie sets a new _Rebuild only when it actually built this tooltip (it returns early for
+            -- faded icons and repeated hovers): only then are its quest lists ours to annotate.
+            if tooltip and tooltip._Rebuild ~= before then pcall(DecorateTooltip, tooltip) end
+        end
+    end
+
+    if Q.AQ.CalculateAndDrawAll then
+        local originalCalc = Q.AQ.CalculateAndDrawAll
+        Q.AQ.CalculateAndDrawAll = function(callback, ...)
+            rootCache = {}
+            return originalCalc(function(...)
+                pcall(PruneRedirects)
+                if callback then return callback(...) end
+            end, ...)
         end
     end
 
@@ -1339,6 +1465,7 @@ function QV.Scan(all, quiet)
                 if not (inLine or inBtw or hasPrereq or inFdb) then counts.none = counts.none + 1 end
                 local okEval, verdict, why = pcall(Evaluate, quest)
                 if not okEval then verdict, why = OK, { "error: " .. tostring(verdict) } end
+                if verdict == HIDE and why.blocker and db.settings.redirect then pcall(ResolveRoot, why.blocker, why) end
                 counts[verdict] = counts[verdict] + 1
                 tinsert(rows, {
                     id = id, name = QField(id, "name"), map = qMap,
@@ -1391,6 +1518,7 @@ function QV.Why(id)
     if not (ok and quest) then Print(format("Questie doesn't know quest %d.", id)) return end
     local okEval, verdict, why = pcall(Evaluate, quest)
     if not okEval then Print("error:", tostring(verdict)) return end
+    if verdict == HIDE and why.blocker and db.settings.redirect then pcall(ResolveRoot, why.blocker, why) end
     Print(format("%s: %s", QuestName(id), VERDICT_LABEL[verdict]))
     local credit = false
     for _, reason in ipairs(why or {}) do
@@ -1581,11 +1709,11 @@ frame:SetScript("OnEvent", function(_, event, ...)
     elseif event == "QUEST_ACCEPTED" then
         OnQuestAccepted(...)
         C_Timer.After(1, RequestLines)
-        C_Timer.After(0.5, function() pcall(PruneRedirects) end)
+        C_Timer.After(0.5, function() rootCache = {} pcall(PruneRedirects) end)
     elseif event == "QUEST_TURNED_IN" then
         lastQuestEvent = GetTime()
         C_Timer.After(1, RequestLines)
-        C_Timer.After(0.5, function() pcall(PruneRedirects) end)
+        C_Timer.After(0.5, function() rootCache = {} pcall(PruneRedirects) end)
     elseif event == "QUEST_COMPLETE" or event == "QUEST_PROGRESS" then
         lastQuestEvent = GetTime()
     end
@@ -1593,5 +1721,6 @@ end)
 
 -- Exposed for debugging: /dump QuestieVerify.status[questId]
 QV.status = status
+function QV.ClearCaches() rootCache = {} end
 QV.lineAvailable = lineAvailable
 function QV.GetBtWIndex() EnsureBtW() return btw end

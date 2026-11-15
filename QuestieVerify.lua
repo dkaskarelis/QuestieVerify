@@ -2105,6 +2105,11 @@ function QV.Why(id)
     local from = StarterText(id)
     Print(format("   picked up%s, from level %d%s", from ~= "" and from or " (giver unknown to Questie)", RequiredLevel(id),
         StepText(id)))
+    local fq = db.settings.foreverdb and FdbQuest(id)
+    if (QField(id, "requiredLevel") or 0) == 0 and fq and (fq.min or 0) > 0 then
+        Print(format("   Questie's data has no required level for it, so Questie would show it only from level %d; "
+            .. "QuestieVerify gives Questie ForeverDB's level %d instead", QField(id, "questLevel") or 0, fq.min))
+    end
     if verdict == LOCK then
         local line = LockedLine(id, why.blocker)
         if line then Print("   " .. line) end

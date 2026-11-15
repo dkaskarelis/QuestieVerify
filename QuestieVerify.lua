@@ -1157,11 +1157,42 @@ local function LockedLine(id, blocker)
     return format("|cffff7755QuestieVerify: %s is locked:|r %s", QuestTitle(id), text)
 end
 
+--- [NPC name] = { locked quests whose red marker was left out at that NPC because it has a real "!" }
+local function LockedAtNpcs()
+    local available = Q.AQ and Q.AQ.__availableQuests or {}
+    local byName = {}
+    for id, st in pairs(status) do
+        if st.lockedAt and available[id] then
+            for _, npc in ipairs(st.lockedAt) do
+                local ok, name = pcall(Q.DB.QueryNPCSingle, npc, "name")
+                if ok and name then
+                    byName[name] = byName[name] or {}
+                    tinsert(byName[name], id)
+                end
+            end
+        end
+    end
+    return byName
+end
+
 local function AddUnlockLines(tooltip)
     local order = tooltip and tooltip.npcAndObjectOrder
     if not order then return false end
     local added = false
     local done = {}
+    -- Locked quests of an NPC that has a real "!": no red marker there, so list them in its tooltip.
+    local lockedAt = LockedAtNpcs()
+    for giver in pairs(order) do
+        for _, id in ipairs(lockedAt[giver] or {}) do
+            local line = not done["l" .. id] and LockedLine(id, status[id].blocker)
+            if line then
+                done["l" .. id] = true
+                if not added then tooltip:AddLine(" ") end
+                tooltip:AddLine(line, 1, 0.82, 0, true)
+                added = true
+            end
+        end
+    end
     for _, quests in pairs(order) do
         for _, tip in pairs(quests) do
             local root = type(tip) == "table" and tip.questId
@@ -1290,7 +1321,7 @@ local function LockedStarts(quest, shown)
     table.sort(out)
     local newStarts = { NPC = (#keep > 0) and keep or nil, GameObject = starts.GameObject, Item = starts.Item }
     local any = newStarts.NPC or newStarts.GameObject or newStarts.Item
-    return any and newStarts or nil, table.concat(out, ",")
+    return any and newStarts or nil, table.concat(out, ","), (#out > 0) and out or nil
 end
 
 local recheckAt = {}   -- [questId] = GetTime() of its last re-check redraw (stops redraw loops)
@@ -1359,12 +1390,16 @@ local function InstallHooks()
             if okL and final == LOCK then
                 -- keep this quest's marker, drawn red, with a tooltip line naming the step to do first;
                 -- not at NPCs that have a real "!" (the red one could cover it)
-                local starts, excluded = LockedStarts(quest, ShownNpcs())
+                -- (at those NPCs it's listed in the real "!"'s tooltip instead: lockedAt)
+                local starts, excluded, lockedAt = LockedStarts(quest, ShownNpcs())
                 if starts then
                     status[quest.Id] = { verdict = LOCK, why = why, root = redirectOf[quest.Id], blocker = why.blocker,
-                        excluded = excluded }
+                        excluded = excluded, lockedAt = lockedAt }
                     return originalDraw(setmetatable({ Starts = starts }, { __index = quest }))
                 end
+                status[quest.Id] = { verdict = HIDE, why = why, root = redirectOf[quest.Id], blocker = why.blocker,
+                    lockedAt = lockedAt }
+                return
             end
             status[quest.Id] = { verdict = verdict, why = why, root = redirectOf[quest.Id] }
             return

@@ -33,6 +33,8 @@ to the first quest you can pick up now (step 1 in a chain of steps 1, 2 and 3):
 - When you hand in step 1, step 2's marker turns normal and step 3's red marker points to step 2.
 - When the step to do first is at the **same NPC**, the later steps' markers are hidden instead: that NPC already
   shows the "!" for the step it will give you.
+- When the NPC of a later step also has a normal "!" for another quest, no red marker is drawn there (it could
+  cover the real one). Instead, that "!"'s tooltip lists the locked quest and the quest to do first.
 
 A previous step counts once it's handed in, not while it's in your log. QuestieVerify only does this for quests
 Questie would otherwise show: when Questie already knows the chain, it shows only step 1, as usual.

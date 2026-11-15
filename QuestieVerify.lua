@@ -41,6 +41,7 @@ local DEFAULTS = {
     learn = true,        -- learn from what NPCs offer
     chains = true,       -- use quest-line / BtWQuests chain data
     revisitLevels = 2,   -- a "not offered here" marker comes back (dimmed) after this many levels
+    levelsAhead = 5,     -- a chain's first step this many levels above you still gives its later steps red markers
     foreverdb = true,    -- use the local ForeverDB.net / community data (Data/ForeverDB.lua)
     redirect = true,     -- a quest blocked by a missing prerequisite points to that prerequisite instead
     autoscan = true,     -- record a scan of each zone you enter (no chat output)
@@ -1475,7 +1476,8 @@ end
 local childrenBuilding = false
 local parentLevel = {}  -- [quest with later steps] = its required level (cached: checked on every pass)
 local CHAIN_DEPTH = 4   -- how many steps past a quest you can pick up still get a red marker
-local LEVELS_AHEAD = 5  -- a first step this many levels above you still starts a chain (later steps: any level)
+--- How many levels above you a chain's first step can be and still start a chain (later steps: any level).
+local function LevelsAhead() return db.settings.levelsAhead or 5 end
 
 --- Builds childrenOf a few hundred quests at a time, so logging in doesn't stall.
 local chainError          -- the first error of the chain-marker code, shown once in chat and by /qv why
@@ -1565,8 +1567,8 @@ local function ChainStepFits(id, available, laterStep)
     if Q.Corr and Q.Corr.hiddenQuests and Q.Corr.hiddenQuests[id] then return false, "hidden by Questie's corrections" end
     if not PlayerCanDo(id) then return false, "not for your race or class (Questie)" end
     local req = RequiredLevel(id)
-    if not laterStep and req > PlayerLevel() + LEVELS_AHEAD then
-        return false, format("needs level %d, more than %d above you", req, LEVELS_AHEAD)
+    if not laterStep and req > PlayerLevel() + LevelsAhead() then
+        return false, format("needs level %d, more than %d above you", req, LevelsAhead())
     end
     for _, other in ipairs(QField(id, "exclusiveTo") or {}) do
         if IsDone(other) then return false, format("only one of it and %s can be done", QuestName(other)) end
@@ -1598,7 +1600,7 @@ local function ChainSteps()
     for id in pairs(childrenOf) do
         local req = parentLevel[id]
         if not req then req = RequiredLevel(id); parentLevel[id] = req end
-        if req > level and req <= level + LEVELS_AHEAD and depth[id] == nil
+        if req > level and req <= level + LevelsAhead() and depth[id] == nil
             and not QuestieBlocker(id) and not FdbBlocked(id) and ChainStepFits(id, available) then
             Seed(id)
         end
@@ -2138,7 +2140,8 @@ function QV.Why(id)
                     elseif QuestieBlocker(step) then start = "Questie says it needs " .. QuestName(QuestieBlocker(step))
                     elseif FdbBlocked(step) then start = "ForeverDB lists an earlier step that isn't handed in"
                     elseif req <= level then start = format("needs level %d, but Questie doesn't show it", req)
-                    elseif req > level + LEVELS_AHEAD then start = format("needs level %d: too far above you", req)
+                    elseif req > level + LevelsAhead() then
+                        start = format("needs level %d: more than %d above you (the 'levels ahead' setting)", req, LevelsAhead())
                     elseif not fits then start = "left out (" .. reason .. ")"
                     else start = format("needs level %d: should start a chain", req) end
                     Print(format("     %s: first step; %s", QuestName(step), start))
@@ -2172,6 +2175,7 @@ local function Help()
     print("  /qv redirect on|off  blocked quests show a red marker that points to the quest to do first (now: " .. (db.settings.redirect and "on" or "off") .. ")")
     print("  /qv autoscan on|off  quietly record a scan of each zone you enter (now: " .. (db.settings.autoscan and "on" or "off") .. ")")
     print("  /qv revisit <n>   levels before a 'not offered' marker comes back dimmed (now: " .. db.settings.revisitLevels .. ")")
+    print("  /qv ahead <n>     red chain markers when the first step is up to n levels above you (now: " .. LevelsAhead() .. ")")
     print("  /qv forget <id>   forget what was learned about a quest   |   /qv forget all")
     print("  /qv refresh       re-check every marker now")
     print("  /qv verbose       toggle extra chat messages")
@@ -2203,6 +2207,15 @@ local function Slash(msg)
             Redraw()
         else
             Print("usage: /qv " .. cmd .. " on|off")
+        end
+    elseif cmd == "ahead" then
+        local n = tonumber(arg)
+        if n and n >= 0 and n <= 20 then
+            db.settings.levelsAhead = math.floor(n)
+            Print("a chain's first step up to " .. db.settings.levelsAhead .. " levels above you starts red markers")
+            Redraw()
+        else
+            Print("usage: /qv ahead <levels, 0-20>")
         end
     elseif cmd == "revisit" then
         local n = tonumber(arg)

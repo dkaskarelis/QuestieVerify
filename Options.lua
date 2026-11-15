@@ -85,6 +85,24 @@ Check("redirect", "Point blocked quests to the quest to do first",
     "A quest whose earlier chain step isn't done keeps a red \"!\". Its tooltip says which quest to pick up first and "
     .. "where. Off: those quests are hidden instead.", 4)
 
+local aheadLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+Row(aheadLabel, 8, 46)
+local function AheadText()
+    local n = S().levelsAhead or 5
+    aheadLabel:SetText(format("Also when the first step is up to %d level%s above you", n, n == 1 and "" or "s"))
+end
+local aheadHelp = "A chain whose first step needs a higher level still gives its later steps red markers, if that "
+    .. "first step is at most this many levels above you. Their tooltip says from which level."
+local aheadMinus = Button("-", 26, aheadHelp, function()
+    QV.SetSetting("levelsAhead", math.max(0, (S().levelsAhead or 5) - 1)); AheadText()
+end)
+local aheadPlus = Button("+", 26, aheadHelp, function()
+    QV.SetSetting("levelsAhead", math.min(20, (S().levelsAhead or 5) + 1)); AheadText()
+end)
+aheadMinus:SetPoint("LEFT", aheadLabel, "RIGHT", 10, 0)
+aheadPlus:SetPoint("LEFT", aheadMinus, "RIGHT", 2, 0)
+tinsert(refreshers, AheadText)
+
 local dimLabel = Text("GameFontHighlight", "Dim markers:", 10, 20)
 local dimModes = {
     { "off", "Never", "Never dim a marker. Quests are either shown or hidden." },

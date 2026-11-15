@@ -2,7 +2,7 @@
 ## Title: QuestieVerify
 ## Notes: Hides or dims Questie "!" markers for quests you can't actually pick up yet (missing chain steps, wrong quest giver).
 ## Author: dkaskarelis
-## Version: 1.5.3
+## Version: 1.5.4
 ## Dependencies: Questie
 ## OptionalDeps: BtWQuests, BtWQuestsClassic
 ## SavedVariables: QuestieVerifyDB

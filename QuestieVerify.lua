@@ -1398,6 +1398,7 @@ end
 
 local childrenOf        -- [quest] = { quests whose Questie prerequisites include it }, built once after login
 local childrenBuilding = false
+local parentLevel = {}  -- [quest with later steps] = its required level (cached: checked on every pass)
 local CHAIN_DEPTH = 4   -- how many steps past a quest you can pick up still get a red marker
 local LEVELS_AHEAD = 5  -- no red marker for steps more than this many levels above you
 
@@ -1474,6 +1475,16 @@ local function ChainSteps()
     end
     for id in pairs(available) do Seed(id) end
     for _, id in ipairs(LogQuestIds()) do Seed(id) end
+    -- first steps a few levels above you (Questie doesn't show those): their later steps say from which level
+    local level = PlayerLevel()
+    for id in pairs(childrenOf) do
+        local req = parentLevel[id]
+        if not req then req = QField(id, "requiredLevel") or 0; parentLevel[id] = req end
+        if req > level and req <= level + LEVELS_AHEAD and depth[id] == nil
+            and not QuestieBlocker(id) and ChainStepFits(id, available) then
+            Seed(id)
+        end
+    end
     local i = 1
     while queue[i] do
         local p = queue[i]
@@ -2186,7 +2197,7 @@ end)
 -- Exposed for debugging: /dump QuestieVerify.status[questId]
 QV.status = status
 QV._internal = { ApplyDim = ApplyDim,   -- for the test harness only; not an API
-    RebuildChildren = function() childrenOf = nil; BuildChildren() end }
+    RebuildChildren = function() childrenOf = nil; parentLevel = {}; BuildChildren() end }
 function QV.ClearCaches() rootCache = {} end
 QV.lineAvailable = lineAvailable
 function QV.GetBtWIndex() EnsureBtW() return btw end

@@ -50,7 +50,9 @@ Turn on Questie → Advanced → Show Quest IDs to see quest IDs in Questie's to
 
 - Quest data and map markers: [Questie](https://github.com/Questie/Questie) and QuestieDB.
 - Optional chain data: [BtWQuests](https://www.curseforge.com/wow/addons/btw-quests).
-- Planned chain data: [ForeverDB.net](https://foreverdb.net).
+- Planned chain data: <a href="https://foreverdb.net">Data from ForeverDB.net</a>. Wherever the add-on shows
+  information based on ForeverDB data (for example `/qv why`), it prints "Data from ForeverDB.net
+  (https://foreverdb.net)" next to it.
 
 Not affiliated with Blizzard Entertainment, the Questie team, BtWQuests or ForeverDB.
 

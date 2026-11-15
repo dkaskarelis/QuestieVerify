@@ -1413,12 +1413,26 @@ local CHAIN_DEPTH = 4   -- how many steps past a quest you can pick up still get
 local LEVELS_AHEAD = 5  -- no red marker for steps more than this many levels above you
 
 --- Builds childrenOf a few hundred quests at a time, so logging in doesn't stall.
+local chainError          -- the first error of the chain-marker code, shown once in chat and by /qv why
+local chainQuestCount = 0 -- how many quests the index was built from (for /qv why)
+
+local function ChainError(err)
+    if chainError then return end
+    chainError = tostring(err)
+    Print("error in the red chain markers (the rest works as before): " .. chainError)
+end
+
+--- Builds childrenOf a few hundred quests at a time, so logging in doesn't stall. Retried later when Questie's
+--- quest list isn't ready yet.
 local function BuildChildren(done)
     if childrenOf or childrenBuilding then return end
     local pointers = Q.DB and Q.DB.QuestPointers
     if type(pointers) ~= "table" then return end
+    local ids = {}
+    for id in pairs(pointers) do ids[#ids + 1] = id end
+    if #ids == 0 then return end
     childrenBuilding = true
-    local index, key = {}, nil
+    local index, i = {}, 0
     local function Add(parent, child)
         if type(parent) ~= "number" then return end
         index[parent] = index[parent] or {}
@@ -1426,30 +1440,35 @@ local function BuildChildren(done)
     end
     local function Step()
         for _ = 1, 400 do
-            key = next(pointers, key)
-            if key == nil then
+            i = i + 1
+            local id = ids[i]
+            if id == nil then
                 -- ForeverDB's prerequisites too: Questie's data often lacks them (The Swarm Grows 1146 -> 1147)
-                for id in pairs(ns.fdb and ns.fdb.quests or {}) do
-                    local q = pointers[id] and FdbQuest(id)
+                for fid in pairs(ns.fdb and ns.fdb.quests or {}) do
+                    local q = pointers[fid] and FdbQuest(fid)
                     if q then
-                        for _, p in ipairs(q.needAll) do Add(p, id) end
-                        for _, p in ipairs(q.needAny) do Add(p, id) end
+                        for _, p in ipairs(q.needAll) do Add(p, fid) end
+                        for _, p in ipairs(q.needAny) do Add(p, fid) end
                     end
                 end
-                childrenOf, childrenBuilding = index, false
+                childrenOf, childrenBuilding, chainQuestCount = index, false, #ids
                 if done then done() end
                 return
             end
             for _, field in ipairs({ "preQuestSingle", "preQuestGroup" }) do
-                local list = QField(key, field)
+                local list = QField(id, field)
                 if type(list) == "table" then
-                    for _, p in ipairs(list) do Add(p, key) end
+                    for _, p in ipairs(list) do Add(p, id) end
                 end
             end
         end
-        C_Timer.After(0, Step)
+        C_Timer.After(0, function()
+            local ok, err = pcall(Step)
+            if not ok then childrenBuilding = false; ChainError(err) end
+        end)
     end
-    Step()
+    local ok, err = pcall(Step)
+    if not ok then childrenBuilding = false; ChainError(err) end
 end
 
 local function LogQuestIds()
@@ -1538,8 +1557,14 @@ local function DropExtra(id)
 end
 
 --- After each Questie pass: draws, updates and removes the red markers of chain steps Questie leaves out.
+local DrawLockedChainsSafe
+
 local function DrawLockedChains()
-    if not (childrenOf and rawDraw and QuestieReady()) then return end
+    if not (rawDraw and QuestieReady()) then return end
+    if not childrenOf then
+        BuildChildren(function() DrawLockedChainsSafe() end)
+        return
+    end
     local available = Q.AQ.__availableQuests or {}
     local want = db.settings.redirect and ChainSteps() or {}
     local nowAvailable = {}
@@ -1569,13 +1594,18 @@ local function DrawLockedChains()
             if extraLocked[id] ~= key or (status[id] and status[id].verdict == LOCK and not HasMarker(id)) then
                 UnloadMarker(id)
                 extraLocked[id] = key
-                pcall(DrawLocked, quest, why)
+                DrawLocked(quest, why)
             end
         elseif extraLocked[id] then
             DropExtra(id)
         end
     end
     if next(nowAvailable) then Redraw(nowAvailable) end
+end
+
+DrawLockedChainsSafe = function()
+    local ok, err = pcall(DrawLockedChains)
+    if not ok then ChainError(err) end
 end
 
 ---------------------------------------------------------------------------
@@ -1646,7 +1676,7 @@ local function InstallHooks()
             rootCache = {}
             return originalCalc(function(...)
                 pcall(PruneRedirects)
-                pcall(DrawLockedChains)
+                DrawLockedChainsSafe()
                 pcall(RecheckLocked)
                 if callback then return callback(...) end
             end, ...)
@@ -1687,7 +1717,7 @@ local function InstallHooks()
     end
 
     hooked = true
-    BuildChildren(function() pcall(DrawLockedChains) end)
+    BuildChildren(DrawLockedChainsSafe)
     return true
 end
 
@@ -1985,6 +2015,24 @@ function QV.Why(id)
         Print("   (a later step of a chain Questie doesn't show: QuestieVerify draws its red marker itself)")
     elseif not (Q.AQ.__availableQuests or {})[id] then
         Print("   (Questie itself doesn't currently show it as available, so it has no marker either way)")
+    end
+    -- what the red chain markers see, for a locked quest Questie doesn't show
+    if verdict == LOCK and not extraLocked[id] and not (Q.AQ.__availableQuests or {})[id] then
+        if chainError then
+            Print("   chain markers stopped by an error: " .. chainError)
+        elseif not childrenOf then
+            Print(childrenBuilding and "   chain markers: still reading Questie's quest list"
+                or "   chain markers: Questie's quest list wasn't ready yet; it's read on the next marker update")
+        else
+            local parents = {}
+            for p, kids in pairs(childrenOf) do
+                for _, c in ipairs(kids) do if c == id then parents[#parents + 1] = tostring(p) break end end
+            end
+            local okW, want = pcall(ChainSteps)
+            Print(format("   chain markers: %d quests read; earlier steps found: %s; red marker wanted: %s",
+                chainQuestCount, #parents > 0 and table.concat(parents, ", ") or "none",
+                okW and tostring(want[id] and true or false) or ("error: " .. tostring(want))))
+        end
     end
 end
 

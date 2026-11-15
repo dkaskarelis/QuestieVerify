@@ -1641,7 +1641,7 @@ end
 ---------------------------------------------------------------------------
 
 local function Help()
-    Print("commands:")
+    Print("commands (or type /qv on its own for the options window):")
     print("  /qv scan          test the current zone: which quests each data source covers")
     print("  /qv scan all      the same for every quest Questie shows")
     print("  /qv why <id>      why a quest's marker is shown, dimmed or hidden")
@@ -1720,10 +1720,22 @@ local function Slash(msg)
     elseif cmd == "verbose" then
         db.settings.verbose = not db.settings.verbose
         Print("verbose: " .. (db.settings.verbose and "on" or "off"))
+    elseif (cmd == "" or cmd == "options" or cmd == "config") and QV.OpenOptions then
+        QV.OpenOptions()
     else
         Help()
     end
 end
+
+-- For the options panel (Options.lua).
+QV.Command = function(msg) Slash(msg) end
+QV.GetSettings = function() return db and db.settings end
+QV.SetSetting = function(key, value)
+    if not (db and DEFAULTS[key] ~= nil) or db.settings[key] == value then return end
+    db.settings[key] = value
+    if key ~= "verbose" and key ~= "autoscan" then Redraw() end
+end
+QV.FdbInfo = function() return ns.fdb and ns.fdb.version, ns.fdb and ns.fdb.build, FDB_CREDIT end
 
 ---------------------------------------------------------------------------
 -- Startup

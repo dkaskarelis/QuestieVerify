@@ -65,7 +65,7 @@ Nothing else is needed: the installer uses only what comes with Windows 10 and 1
    - If WoW is in Program Files, Windows may ask whether to allow changes: click **Yes**. The install then
      carries on in a second window; the first one can be closed with any key.
 5. When it says **Done!**, close the window (press any key, or Enter in the second window). Then quit WoW
-   completely and start it again (not just `/reload`). Type `/qv` in game to see the commands.
+   completely and start it again (not just `/reload`). Type `/qv` in game to open the options.
 
 **When ForeverDB updates**, QuestieVerify says so in chat once. Double-click **Install QuestieVerify** again to
 refresh its copy of the data. The installer only reads ForeverDB's files, so you can switch the ForeverDB addon off in
@@ -79,10 +79,19 @@ The data file (`Data/ForeverDB.lua`) isn't in this repository: the installer (`t
 PC from your ForeverDB addon. ForeverDB's data is GPL-3.0 with an attribution term. WoW Forever's own quest-line table
 is nearly empty (3 quest lines in client build 1.60.1), so ForeverDB is the main source.
 
-## Commands
+## Options
+
+Type **`/qv`** in game, or open **Esc → Options → AddOns → QuestieVerify**. The window has every setting
+(red pointer markers, dimming, data sources, learning from NPCs, zone scans) and buttons to re-check markers, scan the
+zone and forget what was learned. Hover over any option for what it does.
+
+## Chat commands
+
+The same settings also work from chat. `/qv help` lists them.
 
 | Command | What it does |
 |---|---|
+| `/qv` | Open the options window |
 | `/qv scan` | Test the current zone: which quests each data source covers |
 | `/qv scan all` | The same for every quest Questie shows |
 | `/qv why <questID>` | Why a quest's marker is shown, dimmed or hidden |

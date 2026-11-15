@@ -18,7 +18,7 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $Here = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)   # the QuestieVerify folder
-$AddonFiles = @("QuestieVerify.toc", "QuestieVerify.lua", "README.md", "LICENSE")
+$AddonFiles = @("QuestieVerify.toc", "QuestieVerify.lua", "Options.lua", "README.md", "LICENSE")
 $Multi = [Text.RegularExpressions.RegexOptions]::Multiline
 
 function Say($msg, $color = "Gray") { Write-Host $msg -ForegroundColor $color }
@@ -330,5 +330,5 @@ if ($hasData) {
 Say ""
 Say "Done! QuestieVerify is installed in $target" "Green"
 Say "If WoW is running, quit it completely and start it again (/reload isn't enough for a new addon)."
-Say "In game, type /qv to see QuestieVerify's commands."
+Say "In game, type /qv to open QuestieVerify's options."
 if ($Elevated) { Say ""; Read-Host "Press Enter to close" | Out-Null }

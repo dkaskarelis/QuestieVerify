@@ -28,6 +28,14 @@ function Fail($msg) {
     if ($Elevated) { Read-Host "Press Enter to close" | Out-Null }
     exit 1
 }
+# Any unexpected error: show it and, in the administrator window, wait so it can be read before the window closes.
+trap {
+    Write-Host ""
+    Write-Host "Something went wrong: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "The install may be incomplete. Try running the installer again." -ForegroundColor Red
+    if ($Elevated) { Read-Host "Press Enter to close" | Out-Null }
+    exit 1
+}
 
 # ------------------------------------------------------------------ data file (ForeverDB + questie-forever-fixes)
 function ReadText($path) {
@@ -51,6 +59,7 @@ function StringEntries($src, $name) {
 function LuaQuote([string]$s) { return '"' + $s.Replace('\', '\\').Replace('"', '\"') + '"' }
 function Num($s) { $s = "$s".Trim(); if ($s -eq "") { return 0 }; return [int]$s }
 function Field($f, $i) { if ($i -lt $f.Count) { return $f[$i] } return "" }
+function Digits($s) { return @([regex]::Matches($s, "\d+") | ForEach-Object { $_.Value }) }   # "1, 2,3" -> 1 2 3
 $B36 = "0123456789abcdefghijklmnopqrstuvwxyz"
 function Unpoint([string]$tok) {   # base-36 map spot -> uiMap id
     [long]$v = 0
@@ -67,9 +76,11 @@ function BuildData($fdbDir, $qffDir, $outPath) {
     $data = Join-Path $fdbDir "Data"
     $toc = ReadText (Join-Path $fdbDir "ForeverDB.toc")
     $version = [regex]::Match($toc, "^## Version:\s*(\S+)", $Multi).Groups[1].Value
+    if (-not $version) { throw "no version in ForeverDB.toc" }
     $qfSrc = ReadText (Join-Path $data "QuestForever.lua")
     $qcSrc = ReadText (Join-Path $data "QuestClassic.lua")
     $build = [regex]::Match($qfSrc, "build (\S+?)\.\s").Groups[1].Value
+    if (-not $build) { throw "no client build in QuestForever.lua" }
 
     $qf = StringEntries $qfSrc "qfQuests"
     $qc = StringEntries $qcSrc "qcQuests"
@@ -103,7 +114,7 @@ function BuildData($fdbDir, $qffDir, $outPath) {
     $tm = [regex]::Match($npcSrc, "^ns\.classTrainers\s*=\s*\{(.*)\}\s*$", $Multi)
     if ($tm.Success) {
         foreach ($c in [regex]::Matches($tm.Groups[1].Value, "([A-Z]+)=\{([\d,\s]*)\}")) {
-            $trainers[$c.Groups[1].Value] = @([regex]::Matches($c.Groups[2].Value, "\d+") | ForEach-Object { $_.Value })
+            $trainers[$c.Groups[1].Value] = Digits $c.Groups[2].Value
         }
     }
 
@@ -150,7 +161,9 @@ function BuildData($fdbDir, $qffDir, $outPath) {
     $qff = @{}
     if ($qffDir) {
         foreach ($fname in @("Generated.lua", "Fixes.lua")) {
-            $src = ReadText (Join-Path $qffDir $fname)
+            $path = Join-Path $qffDir $fname
+            if (-not (Test-Path -LiteralPath $path)) { continue }
+            $src = ReadText $path
             foreach ($m in [regex]::Matches($src, "\[(\d+)\]\s*=\s*\{")) {
                 $depth = 1; $i = $m.Index + $m.Length
                 while ($depth -gt 0 -and $i -lt $src.Length) {
@@ -163,9 +176,8 @@ function BuildData($fdbDir, $qffDir, $outPath) {
                 $single = [regex]::Match($body, "preQuestSingle\s*=\s*\{([\d,\s]*)\}")
                 $group = [regex]::Match($body, "preQuestGroup\s*=\s*\{([\d,\s]*)\}")
                 if ($single.Success -or $group.Success) {
-                    $s1 = if ($single.Success) { (@([regex]::Matches($single.Groups[1].Value, "\d+") | ForEach-Object { $_.Value })) -join " " } else { "" }
-                    $g1 = if ($group.Success) { (@([regex]::Matches($group.Groups[1].Value, "\d+") | ForEach-Object { $_.Value })) -join " " } else { "" }
-                    $qff[[int]$m.Groups[1].Value] = @($s1, $g1)
+                    $qff[[int]$m.Groups[1].Value] = @(((Digits $single.Groups[1].Value) -join " "),
+                                                      ((Digits $group.Groups[1].Value) -join " "))
                 }
             }
         }
@@ -225,10 +237,11 @@ function FindForever {
             if ($ip) { [void]$roots.Add((Split-Path -Parent $ip.TrimEnd('\'))) }   # ...\_retail_ -> the WoW folder
         } catch {}
     }
-    foreach ($d in (Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue)) {
+    # Local hard drives only: checking a disconnected network drive can hang for a long time.
+    foreach ($d in ([IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq "Fixed" -and $_.IsReady })) {
         foreach ($sub in @("Program Files\World of Warcraft", "Program Files (x86)\World of Warcraft",
                            "World of Warcraft", "Games\World of Warcraft", "Battle.net\World of Warcraft")) {
-            [void]$roots.Add((Join-Path $d.Root $sub))
+            [void]$roots.Add((Join-Path $d.RootDirectory.FullName $sub))
         }
     }
     foreach ($r in $roots) { $a = AddonsUnder $r; if ($a) { return $a } }
@@ -240,7 +253,11 @@ function PickFolder {
         $dlg = New-Object Windows.Forms.FolderBrowserDialog
         $dlg.Description = "QuestieVerify couldn't find WoW Forever. Pick your World of Warcraft folder (the one that has _forever_ in it)."
         $dlg.ShowNewFolderButton = $false
-        if ($dlg.ShowDialog() -eq [Windows.Forms.DialogResult]::OK) { return $dlg.SelectedPath }
+        # An invisible always-on-top owner keeps the picker in front of the console window instead of behind it.
+        $owner = New-Object Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false }
+        try {
+            if ($dlg.ShowDialog($owner) -eq [Windows.Forms.DialogResult]::OK) { return $dlg.SelectedPath }
+        } finally { $owner.Dispose() }
     } catch {}
     return $null
 }

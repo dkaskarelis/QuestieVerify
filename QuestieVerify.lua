@@ -1661,9 +1661,17 @@ local function AutoScan()
 end
 
 -- The data file is built from the installed ForeverDB addon by the installer; say so once when it's missing or older.
-local function CheckFdbData()
+-- The version comes from ForeverDB's .toc, which the game reads even when ForeverDB is switched off in game.
+local function InstalledFdbVersion()
+    local meta = (C_AddOns and C_AddOns.GetAddOnMetadata) or _G.GetAddOnMetadata
+    local ok, v = pcall(meta, "ForeverDB", "Version")
+    if ok and type(v) == "string" and v ~= "" then return v end
     local fc = _G.ForeverDB_Companion
-    local have = type(fc) == "table" and fc.version
+    return type(fc) == "table" and fc.version or nil
+end
+
+local function CheckFdbData()
+    local have = InstalledFdbVersion()
     if not have or not db or db.fdbNotice == have then return end
     local built = ns.fdb and ns.fdb.version
     if built == have then return end

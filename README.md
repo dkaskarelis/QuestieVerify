@@ -51,13 +51,14 @@ Nothing else is needed: the installer uses only what comes with Windows 10 and 1
    - If Windows shows "Windows protected your PC", click **More info**, then **Run anyway**. Windows shows this
      for any file downloaded from the internet that isn't from a big publisher.
    - It finds WoW Forever by itself. If it can't, a window asks you to pick your World of Warcraft folder.
-   - If WoW is in Program Files, Windows asks whether to allow changes: click **Yes**.
-5. When it says **Done!**, press any key to close it. Then quit WoW completely and start it again
-   (not just `/reload`). Type `/qv` in game to see the commands.
+   - If WoW is in Program Files, Windows may ask whether to allow changes: click **Yes**. The install then
+     carries on in a second window; the first one can be closed with any key.
+5. When it says **Done!**, close the window (press any key, or Enter in the second window). Then quit WoW
+   completely and start it again (not just `/reload`). Type `/qv` in game to see the commands.
 
 **When ForeverDB updates**, QuestieVerify says so in chat once. Double-click **Install QuestieVerify** again to
 refresh its copy of the data. The installer only reads ForeverDB's files, so you can switch the ForeverDB addon off in
-game if you don't want it running.
+game if you don't want it running; the update reminder still works, as long as ForeverDB stays installed.
 
 **Uninstall:** delete `Interface\AddOns\QuestieVerify`. Questie's own files are never changed.
 

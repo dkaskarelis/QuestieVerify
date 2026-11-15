@@ -40,6 +40,8 @@ local DEFAULTS = {
     chains = true,       -- use quest-line / BtWQuests chain data
     revisitLevels = 2,   -- a "not offered here" marker comes back (dimmed) after this many levels
     foreverdb = true,    -- use the local ForeverDB.net / community data (Data/ForeverDB.lua)
+    redirect = true,     -- a quest blocked by a missing prerequisite points to that prerequisite instead
+    autoscan = true,     -- record a scan of each zone you enter (no chat output)
     verbose = false,
 }
 
@@ -102,18 +104,29 @@ local function PlayerLevel()
     return UnitLevel("player") or 1
 end
 
---- Completed, or currently in the quest log.
-local function IsDone(id)
+--- Handed in.
+local function IsComplete(id)
     if not id then return false end
     local complete = Questie and Questie.db and Questie.db.char and Questie.db.char.complete
     if complete and complete[id] then return true end
+    if C_QuestLog and C_QuestLog.IsQuestFlaggedCompleted and C_QuestLog.IsQuestFlaggedCompleted(id) then return true end
+    return false
+end
+
+--- In the quest log now.
+local function InLog(id)
+    if not id then return false end
     if C_QuestLog then
-        if C_QuestLog.IsQuestFlaggedCompleted and C_QuestLog.IsQuestFlaggedCompleted(id) then return true end
         if C_QuestLog.GetLogIndexForQuestID and C_QuestLog.GetLogIndexForQuestID(id) then return true end
         if C_QuestLog.IsOnQuest and C_QuestLog.IsOnQuest(id) then return true end
     end
     if GetQuestLogIndexByID and (GetQuestLogIndexByID(id) or 0) > 0 then return true end
     return false
+end
+
+--- Handed in, or in the quest log. (A prerequisite counts only when handed in: IsComplete.)
+local function IsDone(id)
+    return IsComplete(id) or InLog(id)
 end
 
 --- Whether this character's race and class can take the quest (true when Questie doesn't know it).
@@ -223,16 +236,17 @@ local function CheckQuestLine(id, why)
         tinsert(why, format("game quest line '%s': first step", lineName))
         return OK
     end
-    if IsDone(p1) then
+    if IsComplete(p1) then
         tinsert(why, format("game quest line '%s': previous step %s is done", lineName, QuestName(p1)))
         return OK
     end
-    if p2 and IsDone(p2) then
+    if p2 and IsComplete(p2) then
         -- Quest lines are flat lists; parallel steps look sequential. Not sure enough to hide.
         tinsert(why, format("game quest line '%s': previous step %s isn't done (could be a side branch)", lineName, QuestName(p1)))
         return DIM
     end
     tinsert(why, format("game quest line '%s': previous step %s isn't done", lineName, QuestName(p1)))
+    why.blocker = p1
     return HIDE
 end
 
@@ -392,7 +406,7 @@ end
 
 local function NodeDone(node)
     for _, q in ipairs(node.ids) do
-        if IsDone(q) then return true end
+        if IsComplete(q) then return true end
     end
     return false
 end
@@ -424,6 +438,7 @@ local function CheckBtW(id, why)
         return OK
     end
     tinsert(why, format("BtWQuests chain: previous step %s isn't done", QuestName(blockedBy)))
+    why.blocker = blockedBy
     return HIDE
 end
 
@@ -638,7 +653,7 @@ local function CheckForeverDB(id, why)
             return HIDE
         end
         for _, p in ipairs(q.needAll) do
-            if not IsDone(p) then
+            if not IsComplete(p) then
                 -- "offered after" is an order players saw, not always a rule: it doesn't count when the earlier
                 -- quest isn't one this character can take (another race's or class's version)
                 local soft = false
@@ -648,6 +663,7 @@ local function CheckForeverDB(id, why)
                 end
                 if not soft then
                     tinsert(why, format("ForeverDB: needs %s first", QuestName(p)))
+                    why.blocker = p
                     return HIDE
                 end
             end
@@ -655,9 +671,15 @@ local function CheckForeverDB(id, why)
         end
         if #q.needAny > 0 then
             local any
-            for _, p in ipairs(q.needAny) do if IsDone(p) then any = p break end end
+            for _, p in ipairs(q.needAny) do if IsComplete(p) then any = p break end end
             if not any then
-                tinsert(why, format("ForeverDB: needs one of %s first", QuestName(q.needAny[1])))
+                local pick = q.needAny[1]
+                for _, p in ipairs(q.needAny) do
+                    local pq = FdbQuest(p)
+                    if InLog(p) or (pq and FdbFits(pq, me) and not FdbOfferRuledOut(p, me)) then pick = p break end
+                end
+                tinsert(why, format("ForeverDB: needs %s (or another quest of its set) first", QuestName(pick)))
+                why.blocker = pick
                 return HIDE
             end
             known = true
@@ -677,16 +699,18 @@ local function CheckForeverDB(id, why)
         local single, all = Ids(fix[1]), Ids(fix[2])
         if #single > 0 then
             local any
-            for _, p in ipairs(single) do if IsDone(p) then any = p break end end
+            for _, p in ipairs(single) do if IsComplete(p) then any = p break end end
             if not any then
                 tinsert(why, format("questie-forever-fixes: needs %s first", QuestName(single[1])))
+                why.blocker = single[1]
                 return HIDE
             end
             known = true
         end
         for _, p in ipairs(all) do
-            if not IsDone(p) then
+            if not IsComplete(p) then
                 tinsert(why, format("questie-forever-fixes: needs %s first", QuestName(p)))
+                why.blocker = p
                 return HIDE
             end
             known = true
@@ -809,6 +833,183 @@ local function Evaluate(quest)
 end
 
 ---------------------------------------------------------------------------
+-- Pointing to the missing prerequisite
+---------------------------------------------------------------------------
+-- A quest hidden because a prerequisite isn't done points to the first quest of its chain you can
+-- pick up now: that quest gets a marker (QuestieVerify draws it if Questie doesn't), and its tooltip
+-- says what it unlocks.
+
+local unlocks = {}     -- [root quest] = { [blocked quest] = true }
+local redirectOf = {}  -- [blocked quest] = root quest
+local forced = {}      -- [root quest] = true: its marker was drawn by QuestieVerify, not Questie
+local hookedDraw       -- the wrapped DrawAvailableQuest
+local redirecting = false
+
+local function QuestieBlocker(id)
+    local single = QField(id, "preQuestSingle")
+    if type(single) == "table" and #single > 0 then
+        local any = false
+        for _, p in ipairs(single) do if IsComplete(p) then any = true break end end
+        if not any then
+            for _, p in ipairs(single) do if InLog(p) or PlayerCanDo(p) then return p end end
+            return single[1]
+        end
+    end
+    local group = QField(id, "preQuestGroup")
+    if type(group) == "table" then
+        for _, p in ipairs(group) do if not IsComplete(p) then return p end end
+    end
+    return nil
+end
+
+--- The first quest of the chain leading to `p` that this character can pick up now.
+--- Returns root, or nil plus why not ("log", "level", "cant") and the quest it stopped at.
+local function FindRoot(p)
+    local seen = {}
+    for _ = 1, 15 do
+        if not p or seen[p] then return nil, "cant", p end
+        seen[p] = true
+        if IsComplete(p) then return nil end
+        if InLog(p) then return nil, "log", p end
+        local nextP = QuestieBlocker(p)
+        if not nextP then
+            local okQ, quest = pcall(Q.DB.GetQuest, p)
+            if not (okQ and quest) then return nil, "cant", p end
+            local okE, verdict, why = pcall(Evaluate, quest)
+            if not okE then return nil, "cant", p end
+            if verdict == HIDE then
+                if not why.blocker then return nil, "cant", p end
+                nextP = why.blocker
+            else
+                local req = QField(p, "requiredLevel") or 0
+                if req > PlayerLevel() then return nil, "level", p end
+                if Q.DB.IsDoable then
+                    local okD, doable = pcall(Q.DB.IsDoable, p)
+                    if okD and doable == false then return nil, "cant", p end
+                end
+                return p
+            end
+        end
+        p = nextP
+    end
+    return nil, "cant", p
+end
+
+local function UnloadMarker(id)
+    if Q.Map and Q.Map.UnloadQuestFrames then pcall(Q.Map.UnloadQuestFrames, Q.Map, id) end
+    if Q.Tooltips and Q.Tooltips.RemoveQuest then pcall(Q.Tooltips.RemoveQuest, Q.Tooltips, id) end
+end
+
+local function ReleaseRoot(root)
+    if unlocks[root] and next(unlocks[root]) then return end
+    unlocks[root] = nil
+    if forced[root] then
+        forced[root] = nil
+        if not (Q.AQ.__availableQuests or {})[root] then UnloadMarker(root) end
+    end
+end
+
+local function ClearRedirect(id)
+    local old = redirectOf[id]
+    if not old then return end
+    redirectOf[id] = nil
+    if unlocks[old] then unlocks[old][id] = nil end
+    ReleaseRoot(old)
+end
+
+local function ClearAllRedirects()
+    for root in pairs(forced) do
+        if not (Q.AQ and (Q.AQ.__availableQuests or {})[root]) then UnloadMarker(root) end
+    end
+    unlocks, redirectOf, forced = {}, {}, {}
+end
+
+--- Called for a quest that is being hidden.
+local function Redirect(id, why)
+    local blocker = why.blocker
+    if not (blocker and db.settings.redirect) or redirecting then ClearRedirect(id) return end
+    local root, reason, at = FindRoot(blocker)
+    if not root then
+        ClearRedirect(id)
+        if reason == "log" then
+            tinsert(why, format("%s is in your quest log: hand it in first", QuestName(at)))
+        elseif reason == "level" then
+            tinsert(why, format("the first step, %s, needs level %d", QuestName(at), QField(at, "requiredLevel") or 0))
+        elseif reason == "cant" then
+            tinsert(why, format("no step of the chain can be picked up now (stopped at %s)", QuestName(at)))
+        end
+        return
+    end
+    if redirectOf[id] ~= root then ClearRedirect(id) end
+    redirectOf[id] = root
+    unlocks[root] = unlocks[root] or {}
+    unlocks[root][id] = true
+    tinsert(why, format("its marker points to %s instead: pick that up first", QuestName(root)))
+    if not (Q.AQ.__availableQuests or {})[root] and not forced[root] and hookedDraw then
+        local okQ, rootQuest = pcall(Q.DB.GetQuest, root)
+        if okQ and rootQuest then
+            forced[root] = true
+            redirecting = true
+            pcall(hookedDraw, rootQuest)
+            redirecting = false
+        end
+    end
+end
+
+--- After a quest is accepted or handed in: drop markers QuestieVerify drew for quests now done or taken.
+local function PruneRedirects()
+    for root in pairs(unlocks) do
+        if IsComplete(root) or InLog(root) then
+            for id in pairs(unlocks[root]) do redirectOf[id] = nil end
+            unlocks[root] = {}
+            ReleaseRoot(root)
+        end
+    end
+end
+
+local function QuestTitle(id)
+    local name = QField(id, "name")
+    return name or ("quest " .. tostring(id))
+end
+
+local function AddUnlockLines(tooltip)
+    local order = tooltip and tooltip.npcAndObjectOrder
+    if not order then return false end
+    local added = false
+    local done = {}
+    for _, quests in pairs(order) do
+        for _, tip in pairs(quests) do
+            local root = type(tip) == "table" and tip.questId
+            if root and unlocks[root] and not done[root] then
+                done[root] = true
+                local names = {}
+                for id in pairs(unlocks[root]) do tinsert(names, QuestTitle(id)) end
+                table.sort(names)
+                if #names > 0 then
+                    if not added then tooltip:AddLine(" ") end
+                    tooltip:AddLine(format("|cff33ff99QuestieVerify:|r %s unlocks %s", QuestTitle(root), table.concat(names, ", ")),
+                        1, 0.82, 0, true)
+                    added = true
+                end
+            end
+        end
+    end
+    return added
+end
+
+local function DecorateTooltip(tooltip)
+    if not tooltip then return end
+    local rebuild = tooltip._Rebuild
+    if rebuild then
+        tooltip._Rebuild = function(t, ...)
+            rebuild(t, ...)
+            if AddUnlockLines(t) then t:Show() end
+        end
+    end
+    if AddUnlockLines(tooltip) then tooltip:Show() end
+end
+
+---------------------------------------------------------------------------
 -- Dimming
 ---------------------------------------------------------------------------
 
@@ -839,6 +1040,7 @@ end
 local function Redraw(questIds)
     if not QuestieReady() then return end
     if questIds == nil then
+        ClearAllRedirects()
         questIds = {}
         for id in pairs(Q.AQ.__availableQuests or {}) do questIds[id] = true end
     end
@@ -878,9 +1080,25 @@ local function InstallHooks()
             end
             return originalDraw(quest)
         end
+        if verdict == HIDE then
+            pcall(Redirect, quest.Id, why)
+            status[quest.Id] = { verdict = verdict, why = why, root = redirectOf[quest.Id] }
+            return
+        end
+        ClearRedirect(quest.Id)
         status[quest.Id] = { verdict = verdict, why = why }
-        if verdict == HIDE then return end
         return originalDraw(proxy or quest)
+    end
+    hookedDraw = Q.AQ.DrawAvailableQuest
+
+    Q.Tooltips = Import("QuestieTooltips")
+    local MIT = Import("MapIconTooltip")
+    if MIT and MIT.ShowOnTooltip then
+        local originalShow = MIT.ShowOnTooltip
+        MIT.ShowOnTooltip = function(self, tooltip, ...)
+            originalShow(self, tooltip, ...)
+            pcall(DecorateTooltip, tooltip)
+        end
     end
 
     if Q.Pool and Q.Pool.GetFrame then
@@ -1088,8 +1306,8 @@ end
 -- /qv scan
 ---------------------------------------------------------------------------
 
-function QV.Scan(all)
-    if not QuestieReady() then Print("Questie hasn't finished loading yet; try again in a moment.") return end
+function QV.Scan(all, quiet)
+    if not QuestieReady() then if quiet then return end Print("Questie hasn't finished loading yet; try again in a moment.") return end
     EnsureBtW()
     local mapId = PlayerMap()
     local where = all and "all zones" or format("%s (map %s)", MapName(mapId), tostring(mapId))
@@ -1154,6 +1372,7 @@ function QV.Scan(all)
         btw = btwSummary,
     }
 
+    if quiet then return end
     local function yn(b) return b and "yes" or "|cffff5555no|r" end
     Print(format("scan of %s: Questie shows %d available quests.", where, counts.total))
     Print(format("  in ForeverDB data: %d   in a game quest line: %d   in a BtWQuests chain: %d   Questie has a prerequisite: %d   none of these: %d",
@@ -1201,6 +1420,8 @@ local function Help()
     print("  /qv foreverdb on|off  use ForeverDB.net data (now: " .. (db.settings.foreverdb and "on" or "off")
         .. (ns.fdb and (", ForeverDB " .. tostring(ns.fdb.version) .. ")") or ", data file missing)"))
     print("      " .. FDB_CREDIT)
+    print("  /qv redirect on|off  blocked quests point to the prerequisite to do first (now: " .. (db.settings.redirect and "on" or "off") .. ")")
+    print("  /qv autoscan on|off  quietly record a scan of each zone you enter (now: " .. (db.settings.autoscan and "on" or "off") .. ")")
     print("  /qv revisit <n>   levels before a 'not offered' marker comes back dimmed (now: " .. db.settings.revisitLevels .. ")")
     print("  /qv forget <id>   forget what was learned about a quest   |   /qv forget all")
     print("  /qv refresh       re-check every marker now")
@@ -1225,7 +1446,7 @@ local function Slash(msg)
         else
             Print("usage: /qv dim off|uncertain|unverified")
         end
-    elseif cmd == "learn" or cmd == "chains" or cmd == "foreverdb" then
+    elseif cmd == "learn" or cmd == "chains" or cmd == "foreverdb" or cmd == "redirect" or cmd == "autoscan" then
         local value = arg:lower()
         if value == "on" or value == "off" then
             db.settings[cmd] = (value == "on")
@@ -1298,6 +1519,19 @@ local function WhenQuestieReady(fn, tries)
     end
 end
 
+local lastAutoScan = {}
+local function AutoScan()
+    if not (db and db.settings.autoscan) then return end
+    C_Timer.After(8, function()
+        WhenQuestieReady(function()
+            local mapId = PlayerMap()
+            if not mapId or (lastAutoScan[mapId] and GetTime() - lastAutoScan[mapId] < 60) then return end
+            lastAutoScan[mapId] = GetTime()
+            pcall(QV.Scan, false, true)
+        end)
+    end)
+end
+
 local frame = CreateFrame("Frame")
 for _, event in ipairs({
     "ADDON_LOADED", "PLAYER_LOGIN", "PLAYER_ENTERING_WORLD", "ZONE_CHANGED_NEW_AREA",
@@ -1332,8 +1566,10 @@ frame:SetScript("OnEvent", function(_, event, ...)
                 WhenQuestieReady(function() Redraw() end)
             end)
         end
+        AutoScan()
     elseif event == "ZONE_CHANGED_NEW_AREA" then
         RequestLines()
+        AutoScan()
     elseif event == "QUESTLINE_UPDATE" then
         RefreshLines()
     elseif event == "GOSSIP_SHOW" then
@@ -1345,9 +1581,11 @@ frame:SetScript("OnEvent", function(_, event, ...)
     elseif event == "QUEST_ACCEPTED" then
         OnQuestAccepted(...)
         C_Timer.After(1, RequestLines)
+        C_Timer.After(0.5, function() pcall(PruneRedirects) end)
     elseif event == "QUEST_TURNED_IN" then
         lastQuestEvent = GetTime()
         C_Timer.After(1, RequestLines)
+        C_Timer.After(0.5, function() pcall(PruneRedirects) end)
     elseif event == "QUEST_COMPLETE" or event == "QUEST_PROGRESS" then
         lastQuestEvent = GetTime()
     end

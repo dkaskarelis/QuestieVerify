@@ -22,6 +22,14 @@ and find nothing. QuestieVerify checks each "!" before Questie draws it and hide
    wrong quest giver.
 4. **Optional dimming** of markers whose evidence is unclear.
 
+**Pointing to the prerequisite.** A quest hidden because a step before it isn't done doesn't just vanish: QuestieVerify
+follows the chain back to the first quest you can pick up now, makes sure that quest has a "!" (drawing one if Questie
+doesn't), and adds "QuestieVerify: <quest> unlocks <quest>" to its map tooltip. If that step is already in your quest
+log, or needs a higher level, `/qv why` says so. A previous step counts once it's handed in, not while it's in your log.
+
+**Automatic scans.** Each zone you enter is scanned quietly (no chat output) and saved in the SavedVariables file, so
+`/qv scan` is only needed to see the summary in chat.
+
 ## ForeverDB data (local build)
 
 The ForeverDB data file isn't in this repository. Build it yourself from the free
@@ -54,6 +62,8 @@ Requires Questie. BtWQuests (with BtWQuests: Classic) is optional.
 | `/qv learn on\|off` | Learn from what NPCs offer |
 | `/qv chains on\|off` | Use quest-chain data |
 | `/qv foreverdb on\|off` | Use the local ForeverDB data |
+| `/qv redirect on\|off` | Point blocked quests to the prerequisite to do first |
+| `/qv autoscan on\|off` | Quietly record a scan of each zone you enter |
 | `/qv revisit <n>` | Levels before a "not offered here" marker comes back dimmed |
 | `/qv forget <questID>` / `/qv forget all` | Forget what was learned |
 | `/qv refresh` | Re-check every marker now |

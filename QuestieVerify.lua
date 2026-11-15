@@ -908,6 +908,16 @@ local hookedDraw       -- the wrapped DrawAvailableQuest
 local rawDraw          -- Questie's own DrawAvailableQuest
 local redirecting = false
 
+--- The level a quest can be picked up from: ForeverDB's when it knows, else Questie's. Questie's data often has no
+--- required level, and Questie then uses the quest's own level (The Swarm Grows: level 33, but taken from 29).
+local function RequiredLevel(id)
+    local q = db.settings.foreverdb and FdbQuest(id)
+    if q and (q.min or 0) > 0 then return q.min end
+    local req = QField(id, "requiredLevel") or 0
+    if req == 0 then req = QField(id, "questLevel") or 0 end
+    return req
+end
+
 local function QuestieBlocker(id)
     local single = QField(id, "preQuestSingle")
     if type(single) == "table" and #single > 0 then
@@ -979,7 +989,7 @@ local function FindRoot(p)
                 if not why.blocker then return nil, "cant", p end
                 nextP = why.blocker
             else
-                local req = QField(p, "requiredLevel") or 0
+                local req = RequiredLevel(p)
                 if req > PlayerLevel() then return nil, "level", p end
                 if not (Q.AQ.__availableQuests or {})[p] and FilteredByQuestie(p) then return nil, "filtered", p end
                 if Q.DB.IsDoable then
@@ -1015,7 +1025,7 @@ local function ResolveRoot(blocker, why)
     elseif reason == "log" then
         tinsert(why, format("%s is in your quest log: hand it in first", QuestName(at)))
     elseif reason == "level" then
-        tinsert(why, format("the first step, %s, needs level %d", QuestName(at), QField(at, "requiredLevel") or 0))
+        tinsert(why, format("the first step, %s, needs level %d", QuestName(at), RequiredLevel(at)))
     elseif reason == "filtered" then
         tinsert(why, format("the first step, %s, is a kind of quest your Questie settings hide", QuestName(at)))
     elseif reason == "cant" then
@@ -1172,7 +1182,7 @@ local function LockedLine(id, blocker)
     elseif reason == "log" then
         text = format("first hand in %s (it's in your quest log)", QuestName(at))
     elseif reason == "level" then
-        text = format("first do %s%s, from level %d", QuestName(at), StarterText(at), QField(at, "requiredLevel") or 0)
+        text = format("first do %s%s, from level %d", QuestName(at), StarterText(at), RequiredLevel(at))
     else
         text = "an earlier step of this chain isn't done"
     end
@@ -1458,7 +1468,7 @@ local function ChainStepFits(id, available)
     if Q.DB.autoBlacklist and Q.DB.autoBlacklist[id] then return false end
     if Q.Corr and Q.Corr.hiddenQuests and Q.Corr.hiddenQuests[id] then return false end
     if not PlayerCanDo(id) then return false end
-    if (QField(id, "requiredLevel") or 0) > PlayerLevel() + LEVELS_AHEAD then return false end
+    if (RequiredLevel(id)) > PlayerLevel() + LEVELS_AHEAD then return false end
     for _, other in ipairs(QField(id, "exclusiveTo") or {}) do
         if IsDone(other) then return false end
     end
@@ -1479,7 +1489,7 @@ local function ChainSteps()
     local level = PlayerLevel()
     for id in pairs(childrenOf) do
         local req = parentLevel[id]
-        if not req then req = QField(id, "requiredLevel") or 0; parentLevel[id] = req end
+        if not req then req = RequiredLevel(id); parentLevel[id] = req end
         if req > level and req <= level + LEVELS_AHEAD and depth[id] == nil
             and not QuestieBlocker(id) and ChainStepFits(id, available) then
             Seed(id)
@@ -1943,6 +1953,8 @@ function QV.Why(id)
     local okF, final = pcall(FinalVerdict, id, verdict, why)
     if okF then verdict = final end
     Print(format("%s: %s", QuestName(id), VERDICT_LABEL[verdict]))
+    local from = StarterText(id)
+    Print(format("   picked up%s, from level %d", from ~= "" and from or " (giver unknown to Questie)", RequiredLevel(id)))
     if verdict == LOCK then
         local line = LockedLine(id, why.blocker)
         if line then Print("   " .. line) end

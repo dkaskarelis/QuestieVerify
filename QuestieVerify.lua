@@ -1410,7 +1410,7 @@ local childrenOf        -- [quest] = { quests whose Questie prerequisites includ
 local childrenBuilding = false
 local parentLevel = {}  -- [quest with later steps] = its required level (cached: checked on every pass)
 local CHAIN_DEPTH = 4   -- how many steps past a quest you can pick up still get a red marker
-local LEVELS_AHEAD = 5  -- no red marker for steps more than this many levels above you
+local LEVELS_AHEAD = 5  -- a first step this many levels above you still starts a chain (later steps: any level)
 
 --- Builds childrenOf a few hundred quests at a time, so logging in doesn't stall.
 local chainError          -- the first error of the chain-marker code, shown once in chat and by /qv why
@@ -1488,7 +1488,7 @@ local function LogQuestIds()
 end
 
 --- Whether a chain step could be a quest for this character at all, apart from its earlier steps.
-local function ChainStepFits(id, available)
+local function ChainStepFits(id, available, laterStep)
     if available[id] then return false, "Questie shows it" end
     if IsComplete(id) then return false, "handed in" end
     if InLog(id) then return false, "in your quest log" end
@@ -1498,7 +1498,7 @@ local function ChainStepFits(id, available)
     if Q.Corr and Q.Corr.hiddenQuests and Q.Corr.hiddenQuests[id] then return false, "hidden by Questie's corrections" end
     if not PlayerCanDo(id) then return false, "not for your race or class (Questie)" end
     local req = RequiredLevel(id)
-    if req > PlayerLevel() + LEVELS_AHEAD then
+    if not laterStep and req > PlayerLevel() + LEVELS_AHEAD then
         return false, format("needs level %d, more than %d above you", req, LEVELS_AHEAD)
     end
     for _, other in ipairs(QField(id, "exclusiveTo") or {}) do
@@ -1544,7 +1544,7 @@ local function ChainSteps()
             for _, c in ipairs(childrenOf[p] or {}) do
                 if depth[c] == nil then
                     depth[c] = depth[p] + 1
-                    if ChainStepFits(c, available) then
+                    if ChainStepFits(c, available, true) then
                         want[c] = true
                         tinsert(queue, c)
                     end
@@ -2045,7 +2045,7 @@ function QV.Why(id)
             for _ = 1, CHAIN_DEPTH + 2 do
                 if seen[step] then break end
                 seen[step] = true
-                local fits, reason = ChainStepFits(step, available)
+                local fits, reason = ChainStepFits(step, available, true)
                 local open = nil
                 for _, p in ipairs(ParentsOf(step)) do
                     if not IsComplete(p) then open = p break end

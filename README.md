@@ -38,8 +38,8 @@ to the first quest you can pick up now (step 1 in a chain of steps 1, 2 and 3):
 
 A previous step counts once it's handed in, not while it's in your log. This works for chains Questie knows too
 (Questie itself would show only step 1): red markers go on up to 4 steps past a quest you can pick up now, have in
-your log, or can pick up within 5 levels (then the tooltip says from which level), and not on steps more than 5
-levels above you. Quest names in these tooltips come with their IDs.
+your log, or can pick up within 5 levels (then the tooltip says from which level), whatever the later steps'
+own levels. Quest names in these tooltips come with their IDs.
 `/qv redirect off` hides blocked quests instead.
 
 **Automatic scans.** Each zone you enter is scanned quietly (no chat output) and saved in the SavedVariables file, so

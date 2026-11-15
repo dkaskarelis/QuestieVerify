@@ -1428,6 +1428,14 @@ local function BuildChildren(done)
         for _ = 1, 400 do
             key = next(pointers, key)
             if key == nil then
+                -- ForeverDB's prerequisites too: Questie's data often lacks them (The Swarm Grows 1146 -> 1147)
+                for id in pairs(ns.fdb and ns.fdb.quests or {}) do
+                    local q = pointers[id] and FdbQuest(id)
+                    if q then
+                        for _, p in ipairs(q.needAll) do Add(p, id) end
+                        for _, p in ipairs(q.needAny) do Add(p, id) end
+                    end
+                end
                 childrenOf, childrenBuilding = index, false
                 if done then done() end
                 return
@@ -1475,6 +1483,14 @@ local function ChainStepFits(id, available)
     return not FilteredByQuestie(id)
 end
 
+--- Whether ForeverDB lists a prerequisite of this quest that isn't handed in.
+local function FdbBlocked(id)
+    local q = db.settings.foreverdb and FdbQuest(id)
+    if not q then return false end
+    for _, p in ipairs(q.needAll) do if not IsComplete(p) then return true end end
+    return #q.needAny > 0 and not AnyComplete(q.needAny)
+end
+
 --- The chain steps that should have a red marker: up to CHAIN_DEPTH steps past each quest you can pick up now or
 --- have in your log.
 local function ChainSteps()
@@ -1491,7 +1507,7 @@ local function ChainSteps()
         local req = parentLevel[id]
         if not req then req = RequiredLevel(id); parentLevel[id] = req end
         if req > level and req <= level + LEVELS_AHEAD and depth[id] == nil
-            and not QuestieBlocker(id) and ChainStepFits(id, available) then
+            and not QuestieBlocker(id) and not FdbBlocked(id) and ChainStepFits(id, available) then
             Seed(id)
         end
     end
@@ -1966,7 +1982,7 @@ function QV.Why(id)
     end
     if credit then Print("   " .. FDB_CREDIT) end
     if extraLocked[id] then
-        Print("   (a step of a chain Questie knows: QuestieVerify draws its red marker itself)")
+        Print("   (a later step of a chain Questie doesn't show: QuestieVerify draws its red marker itself)")
     elseif not (Q.AQ.__availableQuests or {})[id] then
         Print("   (Questie itself doesn't currently show it as available, so it has no marker either way)")
     end

@@ -1489,17 +1489,23 @@ end
 
 --- Whether a chain step could be a quest for this character at all, apart from its earlier steps.
 local function ChainStepFits(id, available)
-    if available[id] or IsComplete(id) or InLog(id) then return false end
+    if available[id] then return false, "Questie shows it" end
+    if IsComplete(id) then return false, "handed in" end
+    if InLog(id) then return false, "in your quest log" end
     local char = Questie and Questie.db and Questie.db.char
-    if char and char.hidden and char.hidden[id] then return false end
-    if Q.DB.autoBlacklist and Q.DB.autoBlacklist[id] then return false end
-    if Q.Corr and Q.Corr.hiddenQuests and Q.Corr.hiddenQuests[id] then return false end
-    if not PlayerCanDo(id) then return false end
-    if (RequiredLevel(id)) > PlayerLevel() + LEVELS_AHEAD then return false end
-    for _, other in ipairs(QField(id, "exclusiveTo") or {}) do
-        if IsDone(other) then return false end
+    if char and char.hidden and char.hidden[id] then return false, "you hid it in Questie" end
+    if Q.DB.autoBlacklist and Q.DB.autoBlacklist[id] then return false, "Questie's automatic blacklist" end
+    if Q.Corr and Q.Corr.hiddenQuests and Q.Corr.hiddenQuests[id] then return false, "hidden by Questie's corrections" end
+    if not PlayerCanDo(id) then return false, "not for your race or class (Questie)" end
+    local req = RequiredLevel(id)
+    if req > PlayerLevel() + LEVELS_AHEAD then
+        return false, format("needs level %d, more than %d above you", req, LEVELS_AHEAD)
     end
-    return not FilteredByQuestie(id)
+    for _, other in ipairs(QField(id, "exclusiveTo") or {}) do
+        if IsDone(other) then return false, format("only one of it and %s can be done", QuestName(other)) end
+    end
+    if FilteredByQuestie(id) then return false, "a kind of quest your Questie settings hide" end
+    return true
 end
 
 --- Whether ForeverDB lists a prerequisite of this quest that isn't handed in.
@@ -2024,14 +2030,48 @@ function QV.Why(id)
             Print(childrenBuilding and "   chain markers: still reading Questie's quest list"
                 or "   chain markers: Questie's quest list wasn't ready yet; it's read on the next marker update")
         else
-            local parents = {}
-            for p, kids in pairs(childrenOf) do
-                for _, c in ipairs(kids) do if c == id then parents[#parents + 1] = tostring(p) break end end
+            -- walk the chain back and say where it stops
+            local available = Q.AQ.__availableQuests or {}
+            local level = PlayerLevel()
+            local function ParentsOf(q)
+                local out = {}
+                for p, kids in pairs(childrenOf) do
+                    for _, c in ipairs(kids) do if c == q then out[#out + 1] = p break end end
+                end
+                return out
+            end
+            Print(format("   chain markers (%d quests read), walking back from this quest:", chainQuestCount))
+            local step, seen = id, {}
+            for _ = 1, CHAIN_DEPTH + 2 do
+                if seen[step] then break end
+                seen[step] = true
+                local fits, reason = ChainStepFits(step, available)
+                local open = nil
+                for _, p in ipairs(ParentsOf(step)) do
+                    if not IsComplete(p) then open = p break end
+                end
+                if open then
+                    Print(format("     %s: %s; comes after %s", QuestName(step), fits and "ok" or ("left out (" .. reason .. ")"),
+                        QuestName(open)))
+                    step = open
+                else
+                    local req = RequiredLevel(step)
+                    local start
+                    if available[step] then start = "Questie shows it, so the chain starts here"
+                    elseif InLog(step) then start = "it's in your log, so the chain starts here"
+                    elseif QuestieBlocker(step) then start = "Questie says it needs " .. QuestName(QuestieBlocker(step))
+                    elseif FdbBlocked(step) then start = "ForeverDB lists an earlier step that isn't handed in"
+                    elseif req <= level then start = format("needs level %d, but Questie doesn't show it", req)
+                    elseif req > level + LEVELS_AHEAD then start = format("needs level %d: too far above you", req)
+                    elseif not fits then start = "left out (" .. reason .. ")"
+                    else start = format("needs level %d: should start a chain", req) end
+                    Print(format("     %s: first step; %s", QuestName(step), start))
+                    break
+                end
             end
             local okW, want = pcall(ChainSteps)
-            Print(format("   chain markers: %d quests read; earlier steps found: %s; red marker wanted: %s",
-                chainQuestCount, #parents > 0 and table.concat(parents, ", ") or "none",
-                okW and tostring(want[id] and true or false) or ("error: " .. tostring(want))))
+            Print("     red marker wanted for this quest: " .. (okW and tostring(want[id] and true or false)
+                or ("error: " .. tostring(want))))
         end
     end
 end

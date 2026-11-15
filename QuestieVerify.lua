@@ -1212,6 +1212,42 @@ local function StepText(id, mid)
     return pos and format(", step %d of %d%s", pos, total, mid and "," or "") or ""
 end
 
+--- The later steps of a chain that the same NPC (or object) gives right after `id`, in order: the run stops at a
+--- step from someone else. Steps already handed in, or that this character can't do, are skipped.
+local function SameGiverNext(id)
+    local out, seen = {}, { [id] = true }
+    if not childrenOf then return out end
+    local frontier = { id }
+    while #frontier > 0 and #out < 12 do
+        local nextFrontier = {}
+        for _, q in ipairs(frontier) do
+            local kids = {}
+            for _, c in ipairs(childrenOf[q] or {}) do kids[#kids + 1] = c end
+            table.sort(kids)
+            for _, c in ipairs(kids) do
+                if not seen[c] then
+                    seen[c] = true
+                    if SameStarter(id, c) and PlayerCanDo(c) and not IsComplete(c) then
+                        out[#out + 1] = c
+                        nextFrontier[#nextFrontier + 1] = c
+                    end
+                end
+            end
+        end
+        frontier = nextFrontier
+    end
+    return out
+end
+
+--- "then from the same NPC: C (id), step 3 of 4; D (id), step 4 of 4", or nil.
+local function SameGiverLine(id)
+    local steps = SameGiverNext(id)
+    if #steps == 0 then return nil end
+    local parts = {}
+    for _, c in ipairs(steps) do parts[#parts + 1] = QuestName(c) .. StepText(c) end
+    return format("|cff33ff99QuestieVerify:|r then from the same giver: %s", table.concat(parts, "; "))
+end
+
 --- The tooltip line of a locked marker: which quest to do first, and where.
 local function LockedLine(id, blocker)
     if not blocker then return nil end
@@ -1296,6 +1332,16 @@ local function AddUnlockLines(tooltip)
                     if not added then tooltip:AddLine(" ") end
                     tooltip:AddLine(format("|cff33ff99QuestieVerify:|r %s is step %d of %d of its chain", QuestName(root), pos, total),
                         1, 0.82, 0, true)
+                    added = true
+                end
+            end
+            -- the steps this same giver hands out after it
+            if root and not done["n" .. root] and not (st and st.verdict == LOCK) then
+                done["n" .. root] = true
+                local line = SameGiverLine(root)
+                if line then
+                    if not added then tooltip:AddLine(" ") end
+                    tooltip:AddLine(line, 1, 0.82, 0, true)
                     added = true
                 end
             end

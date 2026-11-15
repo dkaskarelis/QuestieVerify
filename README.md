@@ -42,7 +42,8 @@ A previous step counts once it's handed in, not while it's in your log. This wor
 (Questie itself would show only step 1): red markers go on up to 4 steps past a quest you can pick up now, have in
 your log, or can pick up within 5 levels (changeable in the options or with `/qv ahead <n>`; the tooltip then says
 from which level), whatever the later steps' own levels. Quest names in these tooltips come with their IDs and
-their step in the chain ("step 3 of 3").
+their step in the chain ("step 3 of 3"). When the same NPC gives the next steps too, its "!" tooltip lists them
+("then from the same giver: …"), up to the first step someone else gives.
 `/qv redirect off` hides blocked quests instead.
 
 **Automatic scans.** Each zone you enter is scanned quietly (no chat output) and saved in the SavedVariables file, so

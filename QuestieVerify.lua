@@ -906,6 +906,8 @@ local forced = {}      -- [root quest] = true: its marker was drawn by QuestieVe
 local extraLocked = {} -- [quest] = key: red markers QuestieVerify drew for chain steps Questie doesn't list itself
 local hookedDraw       -- the wrapped DrawAvailableQuest
 local rawDraw          -- Questie's own DrawAvailableQuest
+local childrenOf       -- [quest] = { quests that need it }: Questie's and ForeverDB's prerequisites, built after login
+local parentsOf        -- [quest] = { quests it needs }, built with childrenOf
 local redirecting = false
 
 --- The level a quest can be picked up from: ForeverDB's when it knows, else Questie's. Questie's data often has no
@@ -1172,6 +1174,43 @@ local function StarterText(id)
     return ""
 end
 
+local longestAfter = {}  -- [quest] = the most steps that come after it (cached; the chain data doesn't change)
+
+--- Where a quest sits in its chain: step, total (nil when it isn't part of a chain).
+local function ChainPosition(id)
+    if not (childrenOf and parentsOf) then return nil end
+    local before, step, seen = 0, id, { [id] = true }
+    while before < 25 do
+        local nextStep
+        for _, p in ipairs(parentsOf[step] or {}) do
+            if not seen[p] then nextStep = p break end
+        end
+        if not nextStep then break end
+        seen[nextStep] = true
+        before, step = before + 1, nextStep
+    end
+    local function Longest(q, depth)
+        if longestAfter[q] then return longestAfter[q] end
+        if depth > 25 then return 0 end
+        local best = 0
+        for _, k in ipairs(childrenOf[q] or {}) do
+            local n = 1 + Longest(k, depth + 1)
+            if n > best then best = n end
+        end
+        longestAfter[q] = best
+        return best
+    end
+    local total = before + 1 + Longest(id, 0)
+    if total < 2 then return nil end
+    return before + 1, total
+end
+
+--- ", step 2 of 5" for a quest in a chain, else "" (`mid`: with a closing comma, for the middle of a sentence).
+local function StepText(id, mid)
+    local pos, total = ChainPosition(id)
+    return pos and format(", step %d of %d%s", pos, total, mid and "," or "") or ""
+end
+
 --- The tooltip line of a locked marker: which quest to do first, and where.
 local function LockedLine(id, blocker)
     if not blocker then return nil end
@@ -1186,7 +1225,7 @@ local function LockedLine(id, blocker)
     else
         text = "an earlier step of this chain isn't done"
     end
-    return format("|cffff7755QuestieVerify: %s is locked:|r %s", QuestName(id), text)
+    return format("|cffff7755QuestieVerify: %s%s is locked:|r %s", QuestName(id), StepText(id, true), text)
 end
 
 --- [NPC name] = { locked quests whose red marker was left out at that NPC because it has a real "!" }
@@ -1243,7 +1282,18 @@ local function AddUnlockLines(tooltip)
                 table.sort(names)
                 if #names > 0 then
                     if not added then tooltip:AddLine(" ") end
-                    tooltip:AddLine(format("|cff33ff99QuestieVerify:|r %s unlocks %s", QuestName(root), table.concat(names, ", ")),
+                    tooltip:AddLine(format("|cff33ff99QuestieVerify:|r %s%s unlocks %s", QuestName(root), StepText(root, true),
+                        table.concat(names, ", ")), 1, 0.82, 0, true)
+                    added = true
+                end
+            end
+            -- any other quest in a chain: where it sits
+            if root and not done["l" .. root] and not done[root] and not done["s" .. root] then
+                done["s" .. root] = true
+                local pos, total = ChainPosition(root)
+                if pos then
+                    if not added then tooltip:AddLine(" ") end
+                    tooltip:AddLine(format("|cff33ff99QuestieVerify:|r %s is step %d of %d of its chain", QuestName(root), pos, total),
                         1, 0.82, 0, true)
                     added = true
                 end
@@ -1253,8 +1303,24 @@ local function AddUnlockLines(tooltip)
     return added
 end
 
+local warnedTooltip = false
+
 local function DecorateTooltip(tooltip)
     if not tooltip then return end
+    if db.settings.verbose then
+        local givers, quests = 0, {}
+        for _, qs in pairs(tooltip.npcAndObjectOrder or {}) do
+            givers = givers + 1
+            for _, tip in pairs(qs) do
+                local id = type(tip) == "table" and tip.questId
+                if id then
+                    local st = status[id]
+                    quests[#quests + 1] = format("%d %s%s", id, st and st.verdict or "-", unlocks[id] and " unlocks" or "")
+                end
+            end
+        end
+        Verbose(format("map tooltip: %d givers, quests: %s", givers, #quests > 0 and table.concat(quests, ", ") or "none"))
+    end
     local rebuild = tooltip._Rebuild
     if rebuild then
         tooltip._Rebuild = function(t, ...)
@@ -1406,7 +1472,6 @@ end
 -- done, so the later steps of a chain it knows never reach the hook. They're found here instead: the quests that
 -- need one you can pick up now or have in your log, then the ones after those.
 
-local childrenOf        -- [quest] = { quests whose Questie prerequisites include it }, built once after login
 local childrenBuilding = false
 local parentLevel = {}  -- [quest with later steps] = its required level (cached: checked on every pass)
 local CHAIN_DEPTH = 4   -- how many steps past a quest you can pick up still get a red marker
@@ -1432,11 +1497,13 @@ local function BuildChildren(done)
     for id in pairs(pointers) do ids[#ids + 1] = id end
     if #ids == 0 then return end
     childrenBuilding = true
-    local index, i = {}, 0
+    local index, parents, i = {}, {}, 0
     local function Add(parent, child)
         if type(parent) ~= "number" then return end
         index[parent] = index[parent] or {}
         tinsert(index[parent], child)
+        parents[child] = parents[child] or {}
+        tinsert(parents[child], parent)
     end
     local function Step()
         for _ = 1, 400 do
@@ -1451,7 +1518,7 @@ local function BuildChildren(done)
                         for _, p in ipairs(q.needAny) do Add(p, fid) end
                     end
                 end
-                childrenOf, childrenBuilding, chainQuestCount = index, false, #ids
+                childrenOf, parentsOf, childrenBuilding, chainQuestCount = index, parents, false, #ids
                 if done then done() end
                 return
             end
@@ -1672,7 +1739,15 @@ local function InstallHooks()
             originalShow(self, tooltip, ...)
             -- Questie sets a new _Rebuild only when it actually built this tooltip (it returns early for
             -- faded icons and repeated hovers): only then are its quest lists ours to annotate.
-            if tooltip and tooltip._Rebuild ~= before then pcall(DecorateTooltip, tooltip) end
+            if tooltip and tooltip._Rebuild ~= before then
+                local ok, err = pcall(DecorateTooltip, tooltip)
+                if not ok and not warnedTooltip then
+                    warnedTooltip = true
+                    Print("error while adding to a map tooltip: " .. tostring(err))
+                end
+            elseif tooltip then
+                Verbose("map tooltip: Questie didn't rebuild it, so nothing was added")
+            end
         end
     end
 
@@ -2006,7 +2081,8 @@ function QV.Why(id)
     if okF then verdict = final end
     Print(format("%s: %s", QuestName(id), VERDICT_LABEL[verdict]))
     local from = StarterText(id)
-    Print(format("   picked up%s, from level %d", from ~= "" and from or " (giver unknown to Questie)", RequiredLevel(id)))
+    Print(format("   picked up%s, from level %d%s", from ~= "" and from or " (giver unknown to Questie)", RequiredLevel(id),
+        StepText(id)))
     if verdict == LOCK then
         local line = LockedLine(id, why.blocker)
         if line then Print("   " .. line) end
@@ -2313,7 +2389,7 @@ end)
 -- Exposed for debugging: /dump QuestieVerify.status[questId]
 QV.status = status
 QV._internal = { ApplyDim = ApplyDim,   -- for the test harness only; not an API
-    RebuildChildren = function() childrenOf = nil; parentLevel = {}; BuildChildren() end }
+    RebuildChildren = function() childrenOf = nil; parentLevel = {}; longestAfter = {}; BuildChildren() end }
 function QV.ClearCaches() rootCache = {} end
 QV.lineAvailable = lineAvailable
 function QV.GetBtWIndex() EnsureBtW() return btw end

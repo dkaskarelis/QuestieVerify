@@ -28,8 +28,10 @@ local QV = {}
 _G.QuestieVerify = QV
 
 local HIDE, DIM, OK = "hide", "dim", "ok"
+local LOCK = "lock"      -- blocked by an earlier chain step: shown as a red "!" that points to the step to do first
 local VERDICT_LABEL = {
     [HIDE] = "|cffff5555hidden|r",
+    [LOCK] = "|cffff7755locked|r (red marker that points to the step to do first)",
     [DIM] = "|cffaaaaaadimmed|r",
     [OK] = "|cff55ff55shown|r",
 }
@@ -1040,6 +1042,38 @@ local function ClearAllRedirects()
     unlocks, redirectOf, forced = {}, {}, {}
 end
 
+--- The NPCs and objects that start a quest, as one set ("n<id>", "o<id>").
+local function StarterSet(id)
+    local set = {}
+    local by = QField(id, "startedBy")
+    if type(by) == "table" then
+        for _, n in ipairs(by[1] or {}) do set["n" .. n] = true end
+        for _, o in ipairs(by[2] or {}) do set["o" .. o] = true end
+    end
+    return set
+end
+
+local function SameStarter(a, b)
+    local sa = StarterSet(a)
+    for k in pairs(StarterSet(b)) do if sa[k] then return true end end
+    return false
+end
+
+--- Whether a quest blocked by `blocker` keeps a (red, locked) marker that points to the step to do first.
+--- Not when that step is at the same NPC: its own "!" is already there, and says what it unlocks.
+local function ShowsLocked(id, blocker)
+    if not (blocker and db.settings.redirect) then return false end
+    local root, reason, at = CachedRoot(blocker)
+    local target = root or ((reason == "log" or reason == "level") and at) or nil
+    return target ~= nil and not SameStarter(id, target)
+end
+
+--- HIDE becomes LOCK for a quest that keeps a locked marker.
+local function FinalVerdict(id, verdict, why)
+    if verdict == HIDE and why and ShowsLocked(id, why.blocker) then return LOCK end
+    return verdict
+end
+
 --- Called for a quest that is being hidden.
 local function Redirect(id, why)
     local blocker = why.blocker
@@ -1083,6 +1117,46 @@ local function QuestTitle(id)
     return name or ("quest " .. tostring(id))
 end
 
+--- " from <NPC> in <zone>" for where a quest is picked up, or "" when unknown.
+local function StarterText(id)
+    local by = QField(id, "startedBy")
+    if type(by) ~= "table" then return "" end
+    local npc = (by[1] or {})[1]
+    if npc then
+        local okN, name = pcall(Q.DB.QueryNPCSingle, npc, "name")
+        local text = " from " .. ((okN and name) or ("NPC " .. npc))
+        local maps = NpcUiMaps(npc)
+        local map = maps and next(maps)
+        if map then text = text .. " in " .. MapName(map) end
+        if #by[1] > 1 then text = text .. " (or another giver)" end
+        return text
+    end
+    local obj = (by[2] or {})[1]
+    if obj and Q.DB.QueryObjectSingle then
+        local okO, name = pcall(Q.DB.QueryObjectSingle, obj, "name")
+        if okO and name then return " from " .. name end
+    end
+    if (by[3] or {})[1] then return " from an item" end
+    return ""
+end
+
+--- The tooltip line of a locked marker: which quest to do first, and where.
+local function LockedLine(id, blocker)
+    if not blocker then return nil end
+    local root, reason, at = CachedRoot(blocker)
+    local text
+    if root then
+        text = format("first pick up %s%s", QuestTitle(root), StarterText(root))
+    elseif reason == "log" then
+        text = format("first hand in %s (it's in your quest log)", QuestTitle(at))
+    elseif reason == "level" then
+        text = format("first do %s%s, from level %d", QuestTitle(at), StarterText(at), QField(at, "requiredLevel") or 0)
+    else
+        text = "an earlier step of this chain isn't done"
+    end
+    return format("|cffff7755QuestieVerify: %s is locked:|r %s", QuestTitle(id), text)
+end
+
 local function AddUnlockLines(tooltip)
     local order = tooltip and tooltip.npcAndObjectOrder
     if not order then return false end
@@ -1091,6 +1165,14 @@ local function AddUnlockLines(tooltip)
     for _, quests in pairs(order) do
         for _, tip in pairs(quests) do
             local root = type(tip) == "table" and tip.questId
+            local st = root and status[root]
+            local locked = st and st.verdict == LOCK and not done["l" .. root] and LockedLine(root, st.blocker)
+            if locked then
+                done["l" .. root] = true
+                if not added then tooltip:AddLine(" ") end
+                tooltip:AddLine(locked, 1, 0.82, 0, true)
+                added = true
+            end
             if root and unlocks[root] and not done[root] then
                 done[root] = true
                 local names = {}
@@ -1132,9 +1214,17 @@ end
 
 local function ApplyDim(frame)
     local data = frame.data
-    local dim = data and data.Type == "available" and data.Id and ShouldDim(data.Id) or false
+    local available = data and data.Type == "available" and data.Id
+    local st = available and status[data.Id]
+    local locked = st and st.verdict == LOCK or false
+    local dim = not locked and available and ShouldDim(data.Id) or false
     if frame.texture and frame.texture.SetDesaturated then
-        frame.texture:SetDesaturated(dim)
+        frame.texture:SetDesaturated(dim or locked)
+    end
+    if locked and frame.texture and frame.texture.GetVertexColor then
+        -- red "!": a grey icon tinted red (Questie sets the colour again on its next update; its fading keeps it)
+        local _, _, _, a = frame.texture:GetVertexColor()
+        frame.texture:SetVertexColor(1, 0.35, 0.3, a or 1)
     end
     if dim then frame:SetAlpha(0.45) end
 end
@@ -1194,6 +1284,12 @@ local function InstallHooks()
         end
         if verdict == HIDE then
             pcall(Redirect, quest.Id, why)
+            local okL, final = pcall(FinalVerdict, quest.Id, verdict, why)
+            if okL and final == LOCK then
+                -- keep this quest's marker, drawn red, with a tooltip line naming the step to do first
+                status[quest.Id] = { verdict = LOCK, why = why, root = redirectOf[quest.Id], blocker = why.blocker }
+                return originalDraw(quest)
+            end
             status[quest.Id] = { verdict = verdict, why = why, root = redirectOf[quest.Id] }
             return
         end
@@ -1446,7 +1542,7 @@ function QV.Scan(all, quiet)
         GossipAvailableQuests = C_GossipInfo and C_GossipInfo.GetAvailableQuests and true or false,
     }
 
-    local counts = { total = 0, line = 0, btw = 0, questie = 0, fdb = 0, none = 0, [HIDE] = 0, [DIM] = 0, [OK] = 0 }
+    local counts = { total = 0, line = 0, btw = 0, questie = 0, fdb = 0, none = 0, [HIDE] = 0, [LOCK] = 0, [DIM] = 0, [OK] = 0 }
     local rows = {}
     for id in pairs(Q.AQ.__availableQuests or {}) do
         local qMap = QuestUiMap(id)
@@ -1466,6 +1562,8 @@ function QV.Scan(all, quiet)
                 local okEval, verdict, why = pcall(Evaluate, quest)
                 if not okEval then verdict, why = OK, { "error: " .. tostring(verdict) } end
                 if verdict == HIDE and why.blocker and db.settings.redirect then pcall(ResolveRoot, why.blocker, why) end
+                local okF, final = pcall(FinalVerdict, id, verdict, why)
+                if okF then verdict = final end
                 counts[verdict] = counts[verdict] + 1
                 tinsert(rows, {
                     id = id, name = QField(id, "name"), map = qMap,
@@ -1504,7 +1602,8 @@ function QV.Scan(all, quiet)
     Print(format("scan of %s: Questie shows %d available quests.", where, counts.total))
     Print(format("  in ForeverDB data: %d   in a game quest line: %d   in a BtWQuests chain: %d   Questie has a prerequisite: %d   none of these: %d",
         counts.fdb, counts.line, counts.btw, counts.questie, counts.none))
-    Print(format("  result: %d hidden, %d dimmed, %d shown (dim mode: %s)", counts[HIDE], counts[DIM], counts[OK], db.settings.dim))
+    Print(format("  result: %d hidden, %d locked (red, pointing to the step before), %d dimmed, %d shown (dim mode: %s)",
+        counts[HIDE], counts[LOCK], counts[DIM], counts[OK], db.settings.dim))
     Print("  game's own list of startable quest-line quests here: " .. lineSummary)
     Print(format("  APIs: GetQuestLineInfo %s, GetQuestLineQuests %s, GetAvailableQuestLines %s, gossip quest IDs %s; BtWQuests: %s",
         yn(api.GetQuestLineInfo), yn(api.GetQuestLineQuests), yn(api.GetAvailableQuestLines), yn(api.GossipAvailableQuests), btwSummary))
@@ -1519,7 +1618,13 @@ function QV.Why(id)
     local okEval, verdict, why = pcall(Evaluate, quest)
     if not okEval then Print("error:", tostring(verdict)) return end
     if verdict == HIDE and why.blocker and db.settings.redirect then pcall(ResolveRoot, why.blocker, why) end
+    local okF, final = pcall(FinalVerdict, id, verdict, why)
+    if okF then verdict = final end
     Print(format("%s: %s", QuestName(id), VERDICT_LABEL[verdict]))
+    if verdict == LOCK then
+        local line = LockedLine(id, why.blocker)
+        if line then Print("   " .. line) end
+    end
     local credit = false
     for _, reason in ipairs(why or {}) do
         Print("   - " .. reason)
@@ -1548,7 +1653,7 @@ local function Help()
     print("  /qv foreverdb on|off  use ForeverDB.net data (now: " .. (db.settings.foreverdb and "on" or "off")
         .. (ns.fdb and (", ForeverDB " .. tostring(ns.fdb.version) .. ")") or ", data file missing)"))
     print("      " .. FDB_CREDIT)
-    print("  /qv redirect on|off  blocked quests point to the prerequisite to do first (now: " .. (db.settings.redirect and "on" or "off") .. ")")
+    print("  /qv redirect on|off  blocked quests show a red marker that points to the quest to do first (now: " .. (db.settings.redirect and "on" or "off") .. ")")
     print("  /qv autoscan on|off  quietly record a scan of each zone you enter (now: " .. (db.settings.autoscan and "on" or "off") .. ")")
     print("  /qv revisit <n>   levels before a 'not offered' marker comes back dimmed (now: " .. db.settings.revisitLevels .. ")")
     print("  /qv forget <id>   forget what was learned about a quest   |   /qv forget all")
@@ -1739,7 +1844,17 @@ frame:SetScript("OnEvent", function(_, event, ...)
     elseif event == "QUEST_TURNED_IN" then
         lastQuestEvent = GetTime()
         C_Timer.After(1, RequestLines)
-        C_Timer.After(0.5, function() rootCache = {} pcall(PruneRedirects) end)
+        C_Timer.After(0.5, function()
+            rootCache = {}
+            pcall(PruneRedirects)
+            -- Questie doesn't redraw a marker it already has, so re-check the locked ones: a step of their chain
+            -- may be done now (unlocked, or pointing to the next step).
+            local locked = {}
+            for id, st in pairs(status) do
+                if st.verdict == LOCK and (Q.AQ and (Q.AQ.__availableQuests or {})[id]) then locked[id] = true end
+            end
+            if next(locked) then Redraw(locked) end
+        end)
     elseif event == "QUEST_COMPLETE" or event == "QUEST_PROGRESS" then
         lastQuestEvent = GetTime()
     end
@@ -1747,6 +1862,7 @@ end)
 
 -- Exposed for debugging: /dump QuestieVerify.status[questId]
 QV.status = status
+QV.ApplyDimForTest = ApplyDim
 function QV.ClearCaches() rootCache = {} end
 QV.lineAvailable = lineAvailable
 function QV.GetBtWIndex() EnsureBtW() return btw end

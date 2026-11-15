@@ -22,10 +22,21 @@ and find nothing. QuestieVerify checks each "!" before Questie draws it and hide
    wrong quest giver.
 4. **Optional dimming** of markers whose evidence is unclear.
 
-**Pointing to the prerequisite.** A quest hidden because a step before it isn't done doesn't just vanish: QuestieVerify
-follows the chain back to the first quest you can pick up now, makes sure that quest has a "!" (drawing one if Questie
-doesn't), and adds "QuestieVerify: <quest> unlocks <quest>" to its map tooltip. If that step is already in your quest
-log, or needs a higher level, `/qv why` says so. A previous step counts once it's handed in, not while it's in your log.
+**Pointing to the prerequisite.** When a quest's earlier chain step isn't done, QuestieVerify follows the chain back
+to the first quest you can pick up now (step 1 in a chain of steps 1, 2 and 3):
+
+- The later steps (2 and 3) keep their marker, drawn as a **red "!"**. Its tooltip says what to do first, for example
+  "Step 3 is locked: first pick up Step 1 from Gryan Stoutmantle in Westfall". When step 1 is in your quest log it
+  says to hand it in; when step 1 needs a higher level it says which level.
+- Step 1 gets a normal "!" (QuestieVerify draws one if Questie doesn't), and its tooltip says
+  "Step 1 unlocks Step 2, Step 3".
+- When you hand in step 1, step 2's marker turns normal and step 3's red marker points to step 2.
+- When the step to do first is at the **same NPC**, the later steps' markers are hidden instead: that NPC already
+  shows the "!" for the step it will give you.
+
+A previous step counts once it's handed in, not while it's in your log. QuestieVerify only does this for quests
+Questie would otherwise show: when Questie already knows the chain, it shows only step 1, as usual.
+`/qv redirect off` hides blocked quests instead.
 
 **Automatic scans.** Each zone you enter is scanned quietly (no chat output) and saved in the SavedVariables file, so
 `/qv scan` is only needed to see the summary in chat.
@@ -79,7 +90,7 @@ is nearly empty (3 quest lines in client build 1.60.1), so ForeverDB is the main
 | `/qv learn on\|off` | Learn from what NPCs offer |
 | `/qv chains on\|off` | Use quest-chain data |
 | `/qv foreverdb on\|off` | Use the local ForeverDB data |
-| `/qv redirect on\|off` | Point blocked quests to the prerequisite to do first |
+| `/qv redirect on\|off` | Show blocked quests as red markers that point to the quest to do first (off: hide them) |
 | `/qv autoscan on\|off` | Quietly record a scan of each zone you enter |
 | `/qv revisit <n>` | Levels before a "not offered here" marker comes back dimmed |
 | `/qv forget <questID>` / `/qv forget all` | Forget what was learned |

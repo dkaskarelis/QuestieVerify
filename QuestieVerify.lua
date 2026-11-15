@@ -1373,6 +1373,8 @@ local function Redraw(questIds)
     rootCache = {}
     if questIds == nil then
         ClearAllRedirects()
+        -- (Questie caches which quests are in level range; the levels QuestieVerify fills in can change)
+        if Q.AQ.ResetLevelRequirementCache then pcall(Q.AQ.ResetLevelRequirementCache) end
         questIds = {}
         for id in pairs(Q.AQ.__availableQuests or {}) do questIds[id] = true end
     end
@@ -1702,6 +1704,24 @@ local function InstallHooks()
     end
 
     Q.Corr = Import("QuestieCorrections")
+
+    -- Quests Questie has no required level for: Questie then uses the quest's own level and shows them only from
+    -- that level (The Swarm Grows: 33, though the game offers it from 29). Fill in ForeverDB's minimum level.
+    local lib = Import("QuestieLib")
+    if lib and lib.GetEffectiveQuestLevel then
+        local originalLevel = lib.GetEffectiveQuestLevel
+        lib.GetEffectiveQuestLevel = function(questId, ...)
+            local level, req, maxReq = originalLevel(questId, ...)
+            if req == 0 and db and db.settings.foreverdb then
+                local q = FdbQuest(questId)
+                if q and (q.min or 0) > 0 and (type(level) ~= "number" or level <= 0 or q.min <= level) then
+                    req = q.min
+                end
+            end
+            return level, req, maxReq
+        end
+    end
+
     local originalDraw = Q.AQ.DrawAvailableQuest
     rawDraw = originalDraw
     Q.AQ.DrawAvailableQuest = function(quest)

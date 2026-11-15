@@ -11,7 +11,9 @@ and find nothing. QuestieVerify checks each "!" before Questie draws it and hide
 0. **ForeverDB.net data** (optional, built locally, see below): whether the quest is for your side, race and class,
    its prerequisites, exclusive quests, characters its giver doesn't offer it to, and which NPC players actually got it
    from (a quest giver Questie lists that players never got it from is dropped). Plus the community prerequisite list
-   from [questie-forever-fixes](https://github.com/xelblch/questie-forever-fixes).
+   from [questie-forever-fixes](https://github.com/xelblch/questie-forever-fixes). When Questie's data has no required
+   level for a quest, Questie only shows it from the quest's own level; QuestieVerify gives Questie ForeverDB's minimum
+   level instead, so the "!" appears when the game starts offering it (The Swarm Grows: from 29, not 33).
 1. **The game's own quest-line data** (`C_QuestLine`). If the quest is a step in a quest line and the step before it
    isn't completed or in your quest log, its "!" is hidden.
 2. **BtWQuests chains** (optional). The same check, for quests that aren't in a game quest line and that Questie has no

@@ -1246,12 +1246,83 @@ local function Redraw(questIds)
         questIds = {}
         for id in pairs(Q.AQ.__availableQuests or {}) do questIds[id] = true end
     end
-    for id in pairs(questIds) do
-        pcall(Q.AQ.RemoveQuest, id)
+    -- Questie unloads a quest's frames through a thread callback; recalculating before that has finished
+    -- would see the old frames, skip the quest, and then lose its marker. So wait for every removal.
+    local pending, started = 0, false
+    local function Start()
+        if started then return end
+        started = true
+        Q.AQ.CalculateAndDrawAll()
     end
-    Q.AQ.CalculateAndDrawAll()
+    for _ in pairs(questIds) do pending = pending + 1 end
+    for id in pairs(questIds) do
+        local ok = pcall(Q.AQ.RemoveQuest, id, function()
+            pending = pending - 1
+            if pending <= 0 then Start() end
+        end)
+        if not ok then pending = pending - 1 end
+    end
+    if pending <= 0 then Start() end
+    C_Timer.After(1, Start)   -- (in case a Questie version never calls back)
 end
 QV.Redraw = Redraw
+
+--- The NPCs that have a normal or dimmed "!" from Questie right now. A red marker isn't drawn there:
+--- it could cover the "!" the NPC really has for you.
+local function ShownNpcs()
+    local available = Q.AQ and Q.AQ.__availableQuests or {}
+    local shown = {}
+    for id, st in pairs(status) do
+        if (st.verdict == OK or st.verdict == DIM) and available[id] and st.npcs then
+            for _, npc in ipairs(st.npcs) do shown[npc] = true end
+        end
+    end
+    return shown
+end
+
+--- A locked quest's starters without the NPCs in `shown`, and a key naming the ones left out.
+local function LockedStarts(quest, shown)
+    local starts = quest.Starts or {}
+    local keep, out = {}, {}
+    for _, npc in ipairs(starts.NPC or {}) do
+        if shown[npc] then tinsert(out, npc) else tinsert(keep, npc) end
+    end
+    table.sort(out)
+    local newStarts = { NPC = (#keep > 0) and keep or nil, GameObject = starts.GameObject, Item = starts.Item }
+    local any = newStarts.NPC or newStarts.GameObject or newStarts.Item
+    return any and newStarts or nil, table.concat(out, ",")
+end
+
+local recheckAt = {}   -- [questId] = GetTime() of its last re-check redraw (stops redraw loops)
+
+--- After each Questie pass: Questie never redraws a quest that already has a marker, so re-check the red ones.
+--- A step of their chain may be done now, they may point to a different step, or an NPC may have gained a "!".
+local function RecheckLocked()
+    if not QuestieReady() then return end
+    local available = Q.AQ.__availableQuests or {}
+    local shown = ShownNpcs()
+    local now = GetTime()
+    local changed = {}
+    for id, st in pairs(status) do
+        if st.verdict == LOCK and available[id] and (recheckAt[id] or -10) < now - 2 then
+            local okQ, quest = pcall(Q.DB.GetQuest, id)
+            local final, key
+            if okQ and quest then
+                local okE, verdict, why = pcall(Evaluate, quest)
+                if okE then
+                    local okF, f = pcall(FinalVerdict, id, verdict, why)
+                    if okF then final = f end
+                end
+                key = select(2, LockedStarts(quest, shown))
+            end
+            if final ~= LOCK or key ~= st.excluded then
+                recheckAt[id] = now
+                changed[id] = true
+            end
+        end
+    end
+    if next(changed) then Redraw(changed) end
+end
 
 ---------------------------------------------------------------------------
 -- Hooks into Questie
@@ -1286,16 +1357,22 @@ local function InstallHooks()
             pcall(Redirect, quest.Id, why)
             local okL, final = pcall(FinalVerdict, quest.Id, verdict, why)
             if okL and final == LOCK then
-                -- keep this quest's marker, drawn red, with a tooltip line naming the step to do first
-                status[quest.Id] = { verdict = LOCK, why = why, root = redirectOf[quest.Id], blocker = why.blocker }
-                return originalDraw(quest)
+                -- keep this quest's marker, drawn red, with a tooltip line naming the step to do first;
+                -- not at NPCs that have a real "!" (the red one could cover it)
+                local starts, excluded = LockedStarts(quest, ShownNpcs())
+                if starts then
+                    status[quest.Id] = { verdict = LOCK, why = why, root = redirectOf[quest.Id], blocker = why.blocker,
+                        excluded = excluded }
+                    return originalDraw(setmetatable({ Starts = starts }, { __index = quest }))
+                end
             end
             status[quest.Id] = { verdict = verdict, why = why, root = redirectOf[quest.Id] }
             return
         end
         ClearRedirect(quest.Id)
-        status[quest.Id] = { verdict = verdict, why = why }
-        return originalDraw(proxy or quest)
+        local drawnQuest = proxy or quest
+        status[quest.Id] = { verdict = verdict, why = why, npcs = drawnQuest.Starts and drawnQuest.Starts.NPC }
+        return originalDraw(drawnQuest)
     end
     hookedDraw = Q.AQ.DrawAvailableQuest
 
@@ -1318,6 +1395,7 @@ local function InstallHooks()
             rootCache = {}
             return originalCalc(function(...)
                 pcall(PruneRedirects)
+                pcall(RecheckLocked)
                 if callback then return callback(...) end
             end, ...)
         end
@@ -1336,6 +1414,23 @@ local function InstallHooks()
                 end
             end
             return frame
+        end
+    end
+
+    -- Questie's icon-colour option recolours every icon directly; put the red back on locked markers.
+    if Q.Pool and Q.Pool.UpdateColorConfig then
+        local originalColors = Q.Pool.UpdateColorConfig
+        Q.Pool.UpdateColorConfig = function(...)
+            originalColors(...)
+            if not (Q.Map and Q.Map.GetFramesForQuest) then return end
+            for id, st in pairs(status) do
+                if st.verdict == LOCK then
+                    local ok, frames = pcall(Q.Map.GetFramesForQuest, Q.Map, id)
+                    if ok and type(frames) == "table" then
+                        for _, f in pairs(frames) do pcall(ApplyDim, f) end
+                    end
+                end
+            end
         end
     end
 
@@ -1730,10 +1825,14 @@ end
 -- For the options panel (Options.lua).
 QV.Command = function(msg) Slash(msg) end
 QV.GetSettings = function() return db and db.settings end
+local redrawQueued = false
 QV.SetSetting = function(key, value)
     if not (db and DEFAULTS[key] ~= nil) or db.settings[key] == value then return end
     db.settings[key] = value
-    if key ~= "verbose" and key ~= "autoscan" then Redraw() end
+    if key == "verbose" or key == "autoscan" or redrawQueued then return end
+    -- one redraw shortly after the last click, not one per click
+    redrawQueued = true
+    C_Timer.After(0.5, function() redrawQueued = false; Redraw() end)
 end
 QV.FdbInfo = function() return ns.fdb and ns.fdb.version, ns.fdb and ns.fdb.build, FDB_CREDIT end
 
@@ -1859,13 +1958,7 @@ frame:SetScript("OnEvent", function(_, event, ...)
         C_Timer.After(0.5, function()
             rootCache = {}
             pcall(PruneRedirects)
-            -- Questie doesn't redraw a marker it already has, so re-check the locked ones: a step of their chain
-            -- may be done now (unlocked, or pointing to the next step).
-            local locked = {}
-            for id, st in pairs(status) do
-                if st.verdict == LOCK and (Q.AQ and (Q.AQ.__availableQuests or {})[id]) then locked[id] = true end
-            end
-            if next(locked) then Redraw(locked) end
+            pcall(RecheckLocked)   -- (Questie's own pass after a turn-in re-checks them too)
         end)
     elseif event == "QUEST_COMPLETE" or event == "QUEST_PROGRESS" then
         lastQuestEvent = GetTime()
@@ -1874,7 +1967,7 @@ end)
 
 -- Exposed for debugging: /dump QuestieVerify.status[questId]
 QV.status = status
-QV.ApplyDimForTest = ApplyDim
+QV._internal = { ApplyDim = ApplyDim }   -- for the test harness only; not an API
 function QV.ClearCaches() rootCache = {} end
 QV.lineAvailable = lineAvailable
 function QV.GetBtWIndex() EnsureBtW() return btw end
